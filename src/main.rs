@@ -212,7 +212,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if let Err(e) = cmd_tx_clone.send(MavlinkCommand::GetWaypoints { reply_tx }).await {
                         log::error!("发送命令失败: {}", e);
-                    } else {
+                    }
+                    else {
                         // 等待结果
                         match reply_rx.await {
                             Ok(Ok(waypoints)) => {
@@ -337,15 +338,14 @@ fn mavlink_worker_thread(
         log::error!("发送数据流请求失败: {:?}", e);
     }
     // 状态机相关
-    enum State {
-        Idle,
-        DownloadingWaypoints {
-            expected_count: u16,
-            received_waypoints: Vec<Waypoint>,
-            reply_tx: oneshot::Sender<Result<Vec<Waypoint>>>,
-        },
-    }
-    let mut state = State::Idle;
+    // enum State {
+    //     Idle,
+    //     DownloadingWaypoints {
+    //         expected_count: u16,
+    //         received_waypoints: Vec<Waypoint>,
+    //         reply_tx: oneshot::Sender<Result<Vec<Waypoint>>>,
+    //     },
+    // }
 
     let mavlink_clone_for_blocking = vehicle.clone();
     loop {
@@ -357,57 +357,49 @@ fn mavlink_worker_thread(
             last_heartbeat = std::time::Instant::now();
         }
         // 1. 检查新命令（仅在空闲时接受）
-        if matches!(state, State::Idle) {
-            match cmd_rx.try_recv() {
-                Ok(MavlinkCommand::GetWaypoints { reply_tx }) => {
-                    log::info!("收到航点下载命令，发送 MISSION_REQUEST_LIST");
-                    let req = MavMessage::MISSION_REQUEST_LIST(MISSION_REQUEST_LIST_DATA {
-                        target_system: 1,
-                        target_component: 1,
-                    });
-                    if let Err(e) = vehicle.send_default(&req) {
-                        log::error!("发送 MISSION_REQUEST_LIST 失败: {}", e);
-                        let _ = reply_tx.send(Err(anyhow::anyhow!("发送请求失败")));
-                    } else {
-                        // 进入等待 MISSION_COUNT 的状态，但这里我们实际上需要等待第一个响应
-                        // 为了简化，直接在状态机中处理后续消息
-                        state = State::DownloadingWaypoints {
-                            expected_count: 0, // 暂时未知
-                            received_waypoints: Vec::new(),
-                            reply_tx,
-                        };
-                    }
+        // if matches!(state, State::Idle) {
+        match cmd_rx.try_recv() {
+            Ok(MavlinkCommand::GetWaypoints { reply_tx }) => {
+                log::info!("收到航点下载命令，发送 MISSION_REQUEST_LIST");
+                let req = MavMessage::MISSION_REQUEST_LIST(MISSION_REQUEST_LIST_DATA {
+                    target_system: 1,
+                    target_component: 1,
+                });
+                if let Err(e) = vehicle.send_default(&req) {
+                    log::error!("发送 MISSION_REQUEST_LIST 失败: {}", e);
+                    let _ = reply_tx.send(Err(anyhow::anyhow!("发送请求失败")));
                 }
-                Ok(MavlinkCommand::RequestWaypointList) => {
-                    log::info!("收到航点列表请求命令");
-                    let req = MavMessage::MISSION_REQUEST_LIST(MISSION_REQUEST_LIST_DATA {
-                        target_system: 1,
-                        target_component: 1,
-                    });
-                    if let Err(e) = vehicle.send_default(&req) {
-                        log::error!("发送 MISSION_REQUEST_LIST 失败: {}", e);
-                    }
-                }
-                Ok(MavlinkCommand::RequestWaypoint(seq)) => {
-                    log::info!("收到航点请求命令，序号: {}", seq);
-                    let req = MavMessage::MISSION_REQUEST_INT(MISSION_REQUEST_INT_DATA {
-                        target_system: 1,
-                        target_component: 1,
-                        seq,
-                    });
-                    if let Err(e) = vehicle.send_default(&req) {
-                        log::error!("发送 MISSION_REQUEST_INT 失败: {}", e);
-                    }
-                }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => break,
             }
+            Ok(MavlinkCommand::RequestWaypointList) => {
+                log::info!("收到航点列表请求命令");
+                let req = MavMessage::MISSION_REQUEST_LIST(MISSION_REQUEST_LIST_DATA {
+                    target_system: 1,
+                    target_component: 1,
+                });
+                if let Err(e) = vehicle.send_default(&req) {
+                    log::error!("发送 MISSION_REQUEST_LIST 失败: {}", e);
+                }
+            }
+            Ok(MavlinkCommand::RequestWaypoint(seq)) => {
+                log::info!("收到航点请求命令，序号: {}", seq);
+                let req = MavMessage::MISSION_REQUEST_INT(MISSION_REQUEST_INT_DATA {
+                    target_system: 1,
+                    target_component: 1,
+                    seq,
+                });
+                if let Err(e) = vehicle.send_default(&req) {
+                    log::error!("发送 MISSION_REQUEST_INT 失败: {}", e);
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => break,
         }
+        // }
 
         // 3. 接收 MAVLink 消息（设置超时以避免完全阻塞命令响应）
         match vehicle.try_recv() {
             Ok((header, msg)) => {
-                log::info!("mavlink 消息:{msg:?}");
+                // log::info!("mavlink 消息:{msg:?}");
                 if tx.blocking_send((header, msg)).is_err() {
                     break; // 主线程退出
                 }
