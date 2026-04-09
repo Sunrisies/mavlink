@@ -1,6 +1,9 @@
 {
     "cSpell.words": [
+        "ardupilotmega",
+        "eventloop",
         "mavlink",
-        "mqtt"
+        "mqtt",
+        "QUADROTOR"
     ]
 }

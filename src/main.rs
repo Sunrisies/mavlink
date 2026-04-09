@@ -13,11 +13,7 @@ use rumqttc::v5::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{
-    sync::{Arc, mpsc::Sender},
-    thread,
-    time::Duration,
-};
+use std::{sync::Arc, thread, time::Duration};
 use tokio::sync::mpsc::{self, error::TryRecvError};
 use tokio::task;
 #[derive(Debug)]
@@ -57,7 +53,7 @@ struct Waypoint {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logger();
-    let conn_str = String::from("udpin:192.168.31.236:2345");
+    let conn_str = String::from("udpin:127.0.0.1:2345");
     let topic = String::from("mavlink/incoming");
     let (client, mut eventloop) = setup_mqtt()?;
     // 2. 创建消息通道
@@ -364,7 +360,7 @@ fn setup_mqtt() -> Result<(AsyncClient, EventLoop)> {
     mqtt_opts.set_keep_alive(Duration::from_secs(5));
 
     // 创建异步 MQTT 客户端和事件循环
-    let (client, mut eventloop) = AsyncClient::new(mqtt_opts, 10);
+    let (client, eventloop) = AsyncClient::new(mqtt_opts, 10);
     Ok((client, eventloop))
 }
 
@@ -377,92 +373,6 @@ pub fn heartbeat_message() -> mavlink::ardupilotmega::MavMessage {
         system_status: mavlink::ardupilotmega::MavState::MAV_STATE_STANDBY,
         mavlink_version: 0x3,
     })
-}
-/// 从飞控接收消息并发送到通道
-fn mavlink_receiver_thread(conn_str: String, tx: Sender<(MavHeader, MavMessage)>) -> Result<()> {
-    let mut conn: Box<dyn MavConnection<MavMessage> + Send + Sync> =
-        mavlink::connect::<MavMessage>(&conn_str)?;
-    log::info!("✅ 已连接到飞控: {}", conn_str);
-
-    // 可选：发送心跳以保持连接（飞控可能要求）
-    // 这里简单循环接收
-    loop {
-        match conn.recv() {
-            Ok((header, msg)) => {
-                // log::info!("收到 MAVLink 消息: {msg:?}");
-                if let Err(e) = tx.send((header, msg)) {
-                    log::error!("发送消息到通道失败: {}", e);
-                    break;
-                }
-            }
-            Err(e) => {
-                log::error!("接收 MAVLink 消息失败: {}", e);
-                // 短暂休眠后继续，避免疯狂重试
-                thread::sleep(Duration::from_millis(100));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn fetch_waypoints<F>(
-    conn: &Arc<Box<dyn MavConnection<MavMessage> + Send + Sync>>,
-    mut on_waypoint: F,
-) -> Result<()>
-where
-    F: FnMut(&Waypoint) -> Result<()>,
-{
-    // 发送 MISSION_REQUEST_LIST
-    let req_list = MavMessage::MISSION_REQUEST_LIST(MISSION_REQUEST_LIST_DATA {
-        target_system: 1,
-        target_component: 1,
-    });
-    conn.send_default(&req_list)
-        .map_err(|e| anyhow::anyhow!("发送请求失败: {}", e))?;
-
-    // 等待 MISSION_COUNT
-    let (_, msg) = conn
-        .recv()
-        .map_err(|e| anyhow::anyhow!("接收失败: {}", e))?;
-    let count = match msg {
-        MavMessage::MISSION_COUNT(cnt) => cnt.count,
-        _ => return Err(anyhow::anyhow!("未收到 MISSION_COUNT")),
-    };
-
-    let mut waypoints = Vec::new();
-    for seq in 0..count {
-        // 请求单个航点
-        let req = MavMessage::MISSION_REQUEST_INT(MISSION_REQUEST_INT_DATA {
-            target_system: 1,
-            target_component: 1,
-            seq,
-        });
-        conn.send_default(&req)
-            .map_err(|e| anyhow::anyhow!("发送请求失败: {}", e))?;
-
-        // 等待 MISSION_ITEM_INT
-        let (_, msg) = conn
-            .recv()
-            .map_err(|e| anyhow::anyhow!("接收失败: {}", e))?;
-        match msg {
-            MavMessage::MISSION_ITEM_INT(item) => {
-                let waypoint = Waypoint {
-                    seq: item.seq,
-                    lat: item.x as f64 / 10_000_000.0,
-                    lon: item.y as f64 / 10_000_000.0,
-                    alt: item.z,
-                };
-
-                // 调用回调函数发送航点数据
-                on_waypoint(&waypoint)?;
-
-                waypoints.push(waypoint);
-            }
-            _ => return Err(anyhow::anyhow!("期望 MISSION_ITEM_INT，收到其他消息")),
-        }
-    }
-    log::info!("获取到 {} 个航点", waypoints.len());
-    Ok(())
 }
 
 pub fn request_parameters() -> mavlink::ardupilotmega::MavMessage {
