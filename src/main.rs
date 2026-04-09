@@ -207,7 +207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Ok(payload) => {
                                     if payload.r#type == "get_list" {
                                         // 3. 调用函数
-                                        log::info!("收到 get_list 请求");
+                                        log::error!("收到 get_list 请求");
                                         let (reply_tx, reply_rx) = oneshot::channel();
 
                     if let Err(e) = cmd_tx_clone.send(MavlinkCommand::GetWaypoints { reply_tx }).await {
@@ -407,7 +407,7 @@ fn mavlink_worker_thread(
         // 3. 接收 MAVLink 消息（设置超时以避免完全阻塞命令响应）
         match vehicle.try_recv() {
             Ok((header, msg)) => {
-                // log::info!("mavlink 消息:{msg:?}");
+                log::info!("mavlink 消息:{msg:?}");
                 if tx.blocking_send((header, msg)).is_err() {
                     break; // 主线程退出
                 }
