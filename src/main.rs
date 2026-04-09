@@ -76,11 +76,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (send_tx, mut send_rx) = mpsc::channel::<MavMessage>(256);
     // 从主循环到 MAVLink 线程（用于发送命令）
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<MavlinkCommand>(256);
-    // 启动 MAVLink 接收线程（阻塞）
-
-    // 开启发送mavlink心跳
-
-    // let conn_str_clone = conn_str.clone();
     let tx_clone = mavlink_tx.clone();
     thread::spawn(move || {
         log::info!("---------");
@@ -247,28 +242,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-        //                                  tokio::task::spawn_blocking(move || {
-        //                 //                     // 定义回调函数来处理每个航点
-        //                 let on_waypoint = |waypoint: &Waypoint| -> Result<()> {
-        //                     log::info!("收到航点: {:?}", waypoint);
-        //                     // 通过通道发送航点数据
-        //                     // waypoint_tx_clone.blocking_send(waypoint.clone())
-        //                     //     .map_err(|e| format!("发送航点到通道失败: {}", e))?;
-        //                     Ok(())
-        //                 };
-
-        //                 // 调用 fetch_waypoints 函数
-        //                         match fetch_waypoints(&mavlink_clone_for_blocking, on_waypoint) {
-        //                             Ok(_) => {
-        //     log::info!("成功获取航点");
-        // }
-        // Err(e) => {
-        //     log::error!("获取航点失败: {}", e);
-        // }
-        //                         }
-
-        //                   Ok::<(), anyhow::Error>(())
-        //                                  });
                                     } else {
                                         log::debug!("type 不为 get_list: {:?}", payload);
                                     }
@@ -353,9 +326,7 @@ fn mavlink_worker_thread(
     tx: mpsc::Sender<(MavHeader, MavMessage)>, // 原消息上报通道
     mut cmd_rx: mpsc::Receiver<MavlinkCommand>, // 命令接收通道
 ) -> Result<()> {
-    let conn = mavlink::connect::<MavMessage>(&conn_str)?;
-    log::info!("✅ 已连接到飞控: {}", conn_str);
-    let vehicle = Arc::new(conn);
+    let vehicle = start_mavlink_thread(conn_str);
     let hb_vehicle = vehicle.clone();
     let mut last_heartbeat = std::time::Instant::now();
     // 发送参数请求和数据流请求
@@ -432,24 +403,6 @@ fn mavlink_worker_thread(
                 Err(TryRecvError::Disconnected) => break,
             }
         }
-        // 2. 优先处理命令（非阻塞轮询）
-        // match cmd_rx.try_recv() {
-        //     Ok(MavlinkCommand::GetWaypoints { reply_tx }) => {
-        //         // 在同一个 conn 上执行获取航点逻辑
-        //         let result = fetch_waypoints_with_conn(&mavlink_clone_for_blocking);
-        //         log::info!("111111111111111111111111");
-        //         // 忽略发送失败（调用方可能已取消等待）
-        //         let _ = reply_tx.send(result);
-        //         // 完成后继续循环，不要 break
-        //     }
-        //     Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-        //         // 没有命令，继续处理 MAVLink 消息
-        //     }
-        //     Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-        //         log::warn!("命令通道断开，MAVLink 线程退出");
-        //         break;
-        //     }
-        // }
 
         // 3. 接收 MAVLink 消息（设置超时以避免完全阻塞命令响应）
         match vehicle.try_recv() {
@@ -459,88 +412,7 @@ fn mavlink_worker_thread(
                     break; // 主线程退出
                 }
             }
-            // Ok((header, msg)) => {
-            //     // 根据当前状态处理消息
-            //     match &mut state {
-            //         State::Idle => {
-            //             // 空闲状态：将消息转发到主循环
-            //             if tx.blocking_send((header, msg)).is_err() {
-            //                 break;
-            //             }
-            //         }
-            //         State::DownloadingWaypoints {
-            //             expected_count,
-            //             received_waypoints,
-            //             reply_tx,
-            //         } => {
-            //             match msg {
-            //                 MavMessage::MISSION_COUNT(cnt) => {
-            //                     log::info!("收到 MISSION_COUNT: {}", cnt.count);
-            //                     *expected_count = cnt.count;
-            //                     if cnt.count == 0 {
-            //                         // 无航点，直接完成
-            //                         let result = Ok(Vec::new());
-            //                         let tx = std::mem::replace(reply_tx, oneshot::channel().0);
-            //                         let _ = tx.send(result);
-            //                         state = State::Idle;
-            //                     } else {
-            //                         // 请求第一个航点
-            //                         let req =
-            //                             MavMessage::MISSION_REQUEST_INT(MISSION_REQUEST_INT_DATA {
-            //                                 target_system: 1,
-            //                                 target_component: 1,
-            //                                 seq: 0,
-            //                             });
-            //                         if let Err(e) = vehicle.send_default(&req) {
-            //                             log::error!("发送 MISSION_REQUEST_INT 失败: {}", e);
-            //                             let tx = std::mem::replace(reply_tx, oneshot::channel().0);
-            //                             let _ = tx.send(Err(anyhow::anyhow!("请求航点失败")));
-            //                             state = State::Idle;
-            //                         }
-            //                     }
-            //                 }
-            //                 MavMessage::MISSION_ITEM_INT(item) => {
-            //                     log::info!("收到航点: seq={}", item.seq);
-            //                     let wp = Waypoint {
-            //                         seq: item.seq,
-            //                         lat: item.x as f64 / 10_000_000.0,
-            //                         lon: item.y as f64 / 10_000_000.0,
-            //                         alt: item.z,
-            //                     };
-            //                     received_waypoints.push(wp);
-            //                     let next_seq = item.seq + 1;
-            //                     if next_seq < *expected_count {
-            //                         let req =
-            //                             MavMessage::MISSION_REQUEST_INT(MISSION_REQUEST_INT_DATA {
-            //                                 target_system: 1,
-            //                                 target_component: 1,
-            //                                 seq: next_seq,
-            //                             });
-            //                         if let Err(e) = vehicle.send_default(&req) {
-            //                             log::error!("发送下一个 MISSION_REQUEST_INT 失败: {}", e);
-            //                             let tx = std::mem::replace(reply_tx, oneshot::channel().0);
-            //                             let _ = tx.send(Err(anyhow::anyhow!("请求航点失败")));
-            //                             state = State::Idle;
-            //                         }
-            //                     } else {
-            //                         // 所有航点接收完毕
-            //                         log::info!("航点下载完成，共 {} 个", received_waypoints.len());
-            //                         let result = Ok(std::mem::take(received_waypoints));
-            //                         let tx = std::mem::replace(reply_tx, oneshot::channel().0);
-            //                         let _ = tx.send(result);
-            //                         state = State::Idle;
-            //                     }
-            //                 }
-            //                 _ => {
-            //                     // 下载过程中收到的其他消息（如心跳、系统时间等），仍然需要转发给主循环
-            //                     if tx.blocking_send((header, msg)).is_err() {
-            //                         break;
-            //                     }
-            //                 }
-            //             }
-            //         }
-            //     }
-            // }
+
             Err(MessageReadError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // 没有新消息，休眠一小段时间避免 CPU 空转
                 thread::sleep(Duration::from_millis(10));
