@@ -1,5 +1,8 @@
 use anyhow::Result;
-use mavlink::ardupilotmega::{MISSION_REQUEST_INT_DATA, MISSION_REQUEST_LIST_DATA};
+use mavlink::ardupilotmega::MavCmd::MAV_CMD_COMPONENT_ARM_DISARM;
+use mavlink::ardupilotmega::{
+    COMMAND_LONG_DATA, MISSION_REQUEST_INT_DATA, MISSION_REQUEST_LIST_DATA,
+};
 use std::sync::Arc;
 
 use mavlink::{MavConnection, MavHeader, ardupilotmega::MavMessage};
@@ -20,6 +23,7 @@ pub enum MavlinkActorMessage {
     MavlinkMessage((MavHeader, MavMessage)),
     RequestWaypointList,  // 请求航点列表
     RequestWaypoint(u16), // 请求指定序号的航点
+    ArmDisarm { arm: bool },
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 
@@ -67,6 +71,9 @@ impl MavlinkActor {
                         MavlinkActorMessage::RequestWaypoint(seq) => {
                             // 处理航点请求
                             self.handle_request_waypoint(seq).await?;
+                        }
+                        MavlinkActorMessage::ArmDisarm { arm } => {
+                            self.handle_arm_disarm(arm).await?;
                         }
                     }
                 }
@@ -144,6 +151,22 @@ impl MavlinkActor {
                     _ => self.state.clone(),
                 };
             }
+            // HEARTBEAT
+            MavMessage::HEARTBEAT(heartbeat) => {
+                log::info!("收到心跳: {:?}", heartbeat);
+            }
+            // 加解锁
+            MavMessage::COMMAND_ACK(ack) => {
+                log::info!("收到解锁/上锁响应: {:?}", ack);
+                // match ack.result {
+                //     MAV_RESULT::MAV_RESULT_ACCEPTED => {
+                //         log::info!("解锁/上锁成功");
+                //     }
+                //     _ => {
+                //         log::error!("解锁/上锁失败: {:?}", ack.result);
+                //     }
+                // }
+            }
             _ => {}
         }
 
@@ -173,6 +196,27 @@ impl MavlinkActor {
         });
         if let Err(e) = self.vehicle.send_default(&req) {
             log::error!("发送 MISSION_REQUEST_INT 失败: {}", e);
+        }
+        Ok(())
+    }
+    async fn handle_arm_disarm(&mut self, arm: bool) -> Result<()> {
+        log::info!("收到解锁/上锁命令: {}", arm);
+        let msg = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+            target_system: 1,                      // 动态获取或配置
+            target_component: 1,                   // 飞控组件 ID 通常为 1
+            command: MAV_CMD_COMPONENT_ARM_DISARM, // 400
+            confirmation: 1,                       // 0=首次发送，1=确认
+            param1: if arm { 1.0 } else { 0.0 },
+            param2: 0.0,
+            param3: 0.0,
+            param4: 0.0,
+            param5: 0.0,
+            param6: 0.0,
+            param7: 0.0,
+        });
+        log::info!("发送解锁/上锁命令: {:?}", msg);
+        if let Err(e) = self.vehicle.send_default(&msg) {
+            log::error!("发送解锁/上锁命令失败: {}", e);
         }
         Ok(())
     }

@@ -2,7 +2,10 @@ mod logger;
 
 use anyhow::Result;
 use logger::init_logger;
-use mavlink::{MavConnection, MavHeader, Message, ardupilotmega::MavMessage};
+use mavlink::{
+    MavConnection, MavHeader, Message,
+    ardupilotmega::{MavMessage, MavModeFlag},
+};
 use rumqttc::v5::{
     AsyncClient, Event, EventLoop, MqttOptions,
     mqttbytes::{QoS, v5::Packet},
@@ -13,7 +16,10 @@ use std::{sync::Arc, thread, time::Duration};
 use tokio::sync::mpsc::{self};
 use tokio::task;
 
-use crate::mavlink_actor::{MavlinkActor, MavlinkActorMessage, Waypoint, heartbeat_message};
+use crate::mavlink_actor::{
+    MavlinkActor, MavlinkActorMessage, Waypoint, heartbeat_message, request_parameters,
+    request_stream,
+};
 mod mavlink_actor;
 
 // 定义不同的消息类型
@@ -22,8 +28,8 @@ mod mavlink_actor;
 enum Payload {
     #[serde(rename = "get_list")]
     GetList,
-    // #[serde(rename = "arm")]
-    // Arm { arm: bool },
+    #[serde(rename = "arm")]
+    Arm { arm: bool },
     // #[serde(rename = "set_mode")]
     // SetMode { mode: String },
 }
@@ -163,13 +169,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 log::error!("发送航点列表请求给 Actor 失败: {}", e);
                                             }
                                         }
-                                        // Payload::Arm { arm } => {
-                                        //     // 处理机臂控制请求
-                                        //     log::info!("收到 arm 请求: {}", arm);
-                                        //     if let Err(e) = mqtt_cmd_tx.send(MqttCommand::ArmDisarm { arm }).await {
-                                        //         log::error!("发送机臂控制命令失败: {}", e);
-                                        //     }
-                                        // }
+                                        Payload::Arm { arm } => {
+                                            // 处理机臂控制请求
+                                            log::info!("收到 arm 请求: {}", arm);
+                                            if let Err(e) = mavlink_actor_tx_clone.send(MavlinkActorMessage::ArmDisarm { arm }).await {
+                                                log::error!("发送加解锁控制命令失败: {}", e);
+                                            }
+                                        }
                                         // Payload::SetMode { mode } => {
                                         //     // 处理设置飞行模式请求
                                         //     log::info!("收到 set_mode 请求: {}", mode);
@@ -216,6 +222,12 @@ fn mavlink_receiver_thread(
     actor_tx: mpsc::Sender<MavlinkActorMessage>,
 ) -> Result<()> {
     let mut last_heartbeat = std::time::Instant::now();
+    if let Err(e) = conn.send_default(&request_parameters()) {
+        log::error!("发送参数请求失败: {:?}", e);
+    }
+    if let Err(e) = conn.send_default(&request_stream()) {
+        log::error!("发送数据流请求失败: {:?}", e);
+    }
 
     loop {
         // 1. 定期发送心跳
@@ -270,15 +282,128 @@ async fn send_mqtt_data(
     client: &AsyncClient,
     topic: &str,
 ) -> Result<()> {
-    let payload = json!({
-        "header": {
-            "system_id": header.system_id,
-            "component_id": header.component_id,
-            "sequence": header.sequence,
-        },
-        "message_type": msg.message_name(),
-        "data": msg,
-    });
+    // 将 MAVLink 消息转换为前端可理解的 JSON
+    let payload = match msg {
+        MavMessage::HEARTBEAT(data) => {
+            // 解析加锁/解锁状态
+            let is_armed = data
+                .base_mode
+                .contains(MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED);
+            let arm_status = if is_armed { "解锁" } else { "加锁" };
+
+            // 解析自动/手动模式
+            let is_auto = data
+                .base_mode
+                .contains(MavModeFlag::MAV_MODE_FLAG_AUTO_ENABLED);
+            let mode_type = if is_auto { "自动" } else { "手动" };
+
+            // 解析待机模式
+            let is_standby = !is_armed && !is_auto;
+
+            // 解析具体飞行模式
+            let flight_mode = match data.mavtype {
+                mavlink::ardupilotmega::MavType::MAV_TYPE_QUADROTOR => "四旋翼",
+                mavlink::ardupilotmega::MavType::MAV_TYPE_GROUND_ROVER => "地面车辆",
+                mavlink::ardupilotmega::MavType::MAV_TYPE_FIXED_WING => "固定翼",
+                mavlink::ardupilotmega::MavType::MAV_TYPE_COAXIAL => "共轴直升机",
+                _ => "未知类型",
+            };
+
+            // 解析系统状态
+            let system_status = match data.system_status {
+                mavlink::ardupilotmega::MavState::MAV_STATE_UNINIT => "未初始化",
+                mavlink::ardupilotmega::MavState::MAV_STATE_BOOT => "启动中",
+                mavlink::ardupilotmega::MavState::MAV_STATE_CALIBRATING => "校准中",
+                mavlink::ardupilotmega::MavState::MAV_STATE_STANDBY => "待机",
+                mavlink::ardupilotmega::MavState::MAV_STATE_ACTIVE => "活动",
+                mavlink::ardupilotmega::MavState::MAV_STATE_CRITICAL => "严重故障",
+                mavlink::ardupilotmega::MavState::MAV_STATE_EMERGENCY => "紧急状态",
+                _ => "未知状态",
+            };
+
+            json!({
+                "header": {
+                    "system_id": header.system_id,
+                    "component_id": header.component_id,
+                    "sequence": header.sequence,
+                },
+                "message_type": "HEARTBEAT",
+                "data": {
+                    "custom_mode": data.custom_mode,
+                    "mavtype": flight_mode,
+                    "autopilot": format!("{:?}", data.autopilot),
+                    "base_mode": {
+                        "manual_input_enabled": data.base_mode.contains(MavModeFlag::MAV_MODE_FLAG_MANUAL_INPUT_ENABLED),
+                        "custom_mode_enabled": data.base_mode.contains(MavModeFlag::MAV_MODE_FLAG_CUSTOM_MODE_ENABLED),
+                        "auto_enabled": is_auto,
+                        "guided_enabled": data.base_mode.contains(MavModeFlag::MAV_MODE_FLAG_GUIDED_ENABLED),
+                        "stabilize_enabled": data.base_mode.contains(MavModeFlag::MAV_MODE_FLAG_STABILIZE_ENABLED),
+                        "hil_enabled": data.base_mode.contains(MavModeFlag::MAV_MODE_FLAG_HIL_ENABLED),
+                    },
+                    "system_status": system_status,
+                    "mavlink_version": data.mavlink_version,
+                    // 新增字段
+                    "arm_status": arm_status,
+                    "is_armed": is_armed,
+                    "mode_type": mode_type,
+                    "is_auto": is_auto,
+                    "is_standby": is_standby,
+                }
+            })
+        }
+        MavMessage::GLOBAL_POSITION_INT(data) => {
+            json!({
+                "header": {
+                    "system_id": header.system_id,
+                    "component_id": header.component_id,
+                    "sequence": header.sequence,
+                },
+                "message_type": "GLOBAL_POSITION_INT",
+                "data": {
+                    "time_boot_ms": data.time_boot_ms,
+                    "lat": data.lat as f64 / 1e7,
+                    "lon": data.lon as f64 / 1e7,
+                    "alt": data.alt as f32 / 1000.0,
+                    "relative_alt": data.relative_alt as f32 / 1000.0,
+                    "vx": data.vx as f32 / 100.0,
+                    "vy": data.vy as f32 / 100.0,
+                    "vz": data.vz as f32 / 100.0,
+                    "hdg": data.hdg as f32 / 100.0,
+                }
+            })
+        }
+        MavMessage::ATTITUDE(data) => {
+            json!({
+                "header": {
+                    "system_id": header.system_id,
+                    "component_id": header.component_id,
+                    "sequence": header.sequence,
+                },
+                "message_type": "ATTITUDE",
+                "data": {
+                    "time_boot_ms": data.time_boot_ms,
+                    "roll": data.roll,
+                    "pitch": data.pitch,
+                    "yaw": data.yaw,
+                    "rollspeed": data.rollspeed,
+                    "pitchspeed": data.pitchspeed,
+                    "yawspeed": data.yawspeed,
+                }
+            })
+        }
+        _ => {
+            // 对于其他消息类型，使用通用转换
+            json!({
+                "header": {
+                    "system_id": header.system_id,
+                    "component_id": header.component_id,
+                    "sequence": header.sequence,
+                },
+                "message_type": msg.message_name(),
+                "data": format!("{:?}", msg),
+            })
+        }
+    };
     // log::info!("-----------收到 MAVLink 消息: {payload:?},数据");
     let payload_str = serde_json::to_string(&payload).unwrap_or_else(|e| {
         log::error!("序列化 JSON 失败: {}", e);
