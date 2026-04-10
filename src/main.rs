@@ -2,305 +2,252 @@ mod logger;
 
 use anyhow::Result;
 use logger::init_logger;
-use mavlink::{
-    MavConnection, MavHeader, Message,
-    ardupilotmega::{MISSION_REQUEST_INT_DATA, MISSION_REQUEST_LIST_DATA, MavMessage},
-    error::MessageReadError,
-};
+use mavlink::{MavConnection, MavHeader, Message, ardupilotmega::MavMessage};
 use rumqttc::v5::{
     AsyncClient, Event, EventLoop, MqttOptions,
     mqttbytes::{QoS, v5::Packet},
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use std::{sync::Arc, thread, time::Duration};
-use tokio::sync::mpsc::{self, error::TryRecvError};
+use tokio::sync::mpsc::{self};
 use tokio::task;
-#[derive(Debug)]
-enum MavlinkCommand {
-    RequestWaypointList, // 请求航点列表
-    RequestWaypoint(u16), // 请求指定序号的航点
-                         // 可以添加其他命令类型
-}
-#[derive(Debug)]
-enum MqttCommand {
-    GetWaypoints,
-}
-// 在主函数或顶层定义状态
-enum MissionState {
-    Idle,
-    WaitingCount,
-    Downloading {
-        expected_count: u16,
-        received: Vec<Waypoint>,
-    },
-}
-// 假设 payload 结构如下
+
+use crate::mavlink_actor::{MavlinkActor, MavlinkActorMessage, Waypoint, heartbeat_message};
+mod mavlink_actor;
+
+// 定义不同的消息类型
 #[derive(Debug, Deserialize)]
-struct Payload {
-    r#type: String,
-    // 其他字段...
+#[serde(tag = "type")]
+enum Payload {
+    #[serde(rename = "get_list")]
+    GetList,
+    // #[serde(rename = "arm")]
+    // Arm { arm: bool },
+    // #[serde(rename = "set_mode")]
+    // SetMode { mode: String },
 }
 
-// 定义航点结构体，用于序列化响应
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct Waypoint {
-    seq: u16,
-    lat: f64,
-    lon: f64,
-    alt: f32,
-}
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logger();
-    let conn_str = String::from("udpin:127.0.0.1:2345");
+    let conn_str = String::from("udpin:127.0.0.1:23445");
+    let conn_str_clone = conn_str.clone();
     let topic = String::from("mavlink/incoming");
     let (client, mut eventloop) = setup_mqtt()?;
     // 2. 创建消息通道
     // 从 MAVLink 线程到主循环
     let (mavlink_tx, mut mavlink_rx) = mpsc::channel(256);
     // 从主循环到 MAVLink 线程（用于发送命令）
-    let (cmd_tx, cmd_rx) = mpsc::channel::<MavlinkCommand>(256);
+    let (mavlink_actor_tx, mavlink_actor_rx) = mpsc::channel(256);
     let tx_clone = mavlink_tx.clone();
+    let actor_tx_clone = mavlink_actor_tx.clone();
+    let vehicle = start_mavlink_thread(&conn_str_clone);
+    let vehicle_clone = vehicle.clone();
     thread::spawn(move || {
         log::info!("---------");
-        if let Err(e) = mavlink_worker_thread(conn_str, tx_clone, cmd_rx) {
+        if let Err(e) = mavlink_receiver_thread(&vehicle, tx_clone, actor_tx_clone) {
             log::error!("MAVLink 工作线程崩溃: {}", e);
         }
     });
-    let (mqtt_cmd_tx, mut mqtt_cmd_rx) = mpsc::channel::<MqttCommand>(8); //
+    let mavlink_actor = MavlinkActor::new(vehicle_clone, mavlink_tx);
+    let actor_handle = tokio::spawn(async move {
+        if let Err(e) = mavlink_actor.run(mavlink_actor_rx).await {
+            log::error!("MAVLink Actor 崩溃: {}", e);
+        }
+    });
     let client_clone = client.clone();
     client_clone.subscribe("send", QoS::AtMostOnce).await?;
 
     let topic_clone = topic.clone();
     let publish_task = task::spawn(async move {
-        let mut mission_state: MissionState = MissionState::Idle;
-        let mut start_time: Option<std::time::Instant> = None; // 移到这里
-        loop {
-            tokio::select! {
-                // 接收 MAVLink 消息
-                Some((header, msg)) = mavlink_rx.recv() => {
-                    // 原有消息上报 MQTT（保持不变）
-                    if let Err(e) = send_mqtt_data(header, &msg, &client_clone, &topic_clone).await {
+        let mut waypoint_received: Vec<Waypoint> = Vec::new();
+        let mut expected_total = 0;
+        while let Some((header, msg)) = mavlink_rx.recv().await {
+            match msg {
+                MavMessage::MISSION_COUNT(cnt) => {
+                    expected_total = cnt.count;
+                    log::info!("收到 MISSION_COUNT，总航点数: {}", expected_total);
+                    waypoint_received.clear();
+                    // 可选：发送一个开始下载的 MQTT 通知
+                    let start_json = json!({
+                        "type": "waypoint_download_start",
+                        "total": expected_total,
+                    });
+                    let _ = client_clone
+                        .publish(
+                            "get_list",
+                            QoS::AtLeastOnce,
+                            false,
+                            serde_json::to_vec(&start_json).unwrap(),
+                        )
+                        .await;
+                }
+                MavMessage::MISSION_ITEM_INT(item) => {
+                    let wp = Waypoint {
+                        seq: item.seq,
+                        lat: item.x as f64 / 1e7,
+                        lon: item.y as f64 / 1e7,
+                        alt: item.z,
+                    };
+                    waypoint_received.push(wp.clone());
+
+                    // 发布单个航点到 get_list 频道
+                    let wp_json = json!({
+                        "type": "waypoint",
+                        "total_count": expected_total,
+                        "data": wp,
+                    });
+                    if let Err(e) = client_clone
+                        .publish(
+                            "get_list",
+                            QoS::AtLeastOnce,
+                            false,
+                            serde_json::to_vec(&wp_json).unwrap(),
+                        )
+                        .await
+                    {
+                        log::error!("MQTT 发布航点失败: {}", e);
+                    }
+
+                    // 如果是最后一个航点，发布完成消息
+                    if (item.seq + 1) == expected_total {
+                        let complete_json = json!({
+                            "type": "waypoints_complete",
+                            "count": waypoint_received.len(),
+                            "waypoints": waypoint_received,
+                        });
+                        let _ = client_clone
+                            .publish(
+                                "get_list",
+                                QoS::AtLeastOnce,
+                                false,
+                                serde_json::to_vec(&complete_json).unwrap(),
+                            )
+                            .await;
+                        log::info!("航点下载完成，共 {} 个", waypoint_received.len());
+                        // 可选：输出耗时（如果需要，可以在外部记录 start_time 并通过通道传入）
+                    }
+                }
+                _ => {
+                    // 其他消息发布到原来的 mavlink/incoming 频道
+                    if let Err(e) = send_mqtt_data(header, &msg, &client_clone, &topic_clone).await
+                    {
                         log::error!("发送 MQTT 数据失败: {}", e);
                     }
-
-                    // 状态机处理
-                    mission_state = match msg {
-                        MavMessage::MISSION_COUNT(cnt) => {
-                            log::info!("📊 收到 MISSION_COUNT: total = {}", cnt.count);
-                            match mission_state {
-                                MissionState::WaitingCount => {
-                                    let total = cnt.count;
-                                    if total == 0 {
-                                        // 发送空完成消息（可选）
-                                        let complete = json!({"type":"waypoints_complete","count":0,"waypoints":[]});
-                                        let _ = client_clone.publish("waypoints/response", QoS::AtLeastOnce, false,
-                                                                     serde_json::to_vec(&complete).unwrap()).await;
-                                        MissionState::Idle
-                                    } else {
-                                        // 请求第一个航点
-                                        let _ = cmd_tx.send(MavlinkCommand::RequestWaypoint(0)).await;
-                                        MissionState::Downloading {
-                                            expected_count: total,
-                                            received: Vec::new(),
-                                        }
-                                    }
-                                }
-                                _ => mission_state,
-                            }
-                        }
-                        MavMessage::MISSION_ITEM_INT(item) => {
-                            if let MissionState::Downloading { expected_count, mut received } = mission_state {
-                                let wp = Waypoint {
-                                    seq: item.seq,
-                                    lat: item.x as f64 / 1e7,
-                                    lon: item.y as f64 / 1e7,
-                                    alt: item.z,
-                                };
-                                received.push(wp.clone());
-
-                                // ✅ 发布单个航点，附带总航点数
-                                let wp_json = json!({
-                                    "type": "waypoint",
-                                    "total_count": expected_count,
-                                    "data": wp,
-                                });
-                                if let Err(e) = client_clone.publish("get_list", QoS::AtLeastOnce, false,
-                                                                     serde_json::to_vec(&wp_json).unwrap()).await {
-                                    log::error!("MQTT 发送航点失败: {}", e);
-                                }
-
-                                let next_seq = item.seq + 1;
-                                if next_seq < expected_count {
-                                    let _ = cmd_tx.send(MavlinkCommand::RequestWaypoint(next_seq)).await;
-                                    MissionState::Downloading { expected_count, received }
-                                } else {
-                                    // 下载完成，发送汇总消息
-                                    let complete = json!({
-                                        "type": "waypoints_complete",
-                                        "count": received.len(),
-                                        "waypoints": received,
-                                    });
-                                    let _ = client_clone.publish("waypoints/response", QoS::AtLeastOnce, false,
-                                                                 serde_json::to_vec(&complete).unwrap()).await;
-                                                                 let total = received.len();
-
-                                                                 log::info!("航点下载完成，共 {total} 个", );
-                                                                  if let Some(start) = start_time {
-                                            let elapsed = start.elapsed();
-                                            let rate = total as f64 / elapsed.as_secs_f64();
-                                            log::info!(
-                                                "⏱️ 读取 {} 个航点耗时: {:.2?}, 平均速度: {:.2} 航点/秒",
-                                                total,
-                                                elapsed,
-                                                rate
-                                            );
-                                        }
-
-                                    MissionState::Idle
-                                }
-                            } else {
-                                mission_state
-                            }
-                        }
-                        _ => mission_state,
-                    };
                 }
-
-                // 接收 MQTT 触发命令
-                Some(cmd) = mqtt_cmd_rx.recv() => {
-                    match cmd {
-                        MqttCommand::GetWaypoints => {
-                            log::info!("🚀 收到 MQTT 请求，开始航点下载流程");
-                            // 发送请求列表命令到工作线程
-                              start_time = Some(std::time::Instant::now()); // 在这里赋值
-                            let _ = cmd_tx.send(MavlinkCommand::RequestWaypointList).await;
-                            mission_state = MissionState::WaitingCount;
-                        }
-                    }
-                }
-
-                else => break,
             }
         }
+
         log::warn!("MQTT 发布任务结束");
     });
+    let mavlink_actor_tx_clone = mavlink_actor_tx.clone();
     // 处理 MQTT 事件循环（例如收到订阅确认等）
     loop {
         tokio::select! {
-                    event = eventloop.poll() => {
-                        match event {
-                            Ok(Event::Incoming(Packet::Publish(publish))) => {
-                                // 1. 检查 topic
-                                if publish.topic == "send" {
-                                    // 2. 尝试解析 payload 为 JSON
-                                    match serde_json::from_slice::<Payload>(&publish.payload) {
-                                        Ok(payload) => {
-                                            if payload.r#type == "get_list" {
-                                                // 3. 调用函数
-                                                log::error!("收到 get_list 请求");
-                                                 if let Err(e) = mqtt_cmd_tx.send(MqttCommand::GetWaypoints).await {
-                log::error!("发送内部命令失败: {}", e);
-            }
-        }
-                             }
-                                        Err(e) => {
-                                            log::warn!("解析 payload 失败: {}，原始数据: {:?}", e, publish.payload);
+            event = eventloop.poll() => {
+                match event {
+                    Ok(Event::Incoming(Packet::Publish(publish))) => {
+                        // 1. 检查 topic
+                        if publish.topic == "send" {
+                            // 2. 尝试解析 payload 为 JSON
+                            match serde_json::from_slice::<Payload>(&publish.payload) {
+                                Ok(payload) => {
+                                    match payload {
+                                        Payload::GetList => {
+                                            log::error!("收到 get_list 请求");
+                                            if let Err(e) = mavlink_actor_tx_clone
+                                            .send(MavlinkActorMessage::RequestWaypointList)
+                                            .await
+                                            {
+                                                log::error!("发送航点列表请求给 Actor 失败: {}", e);
+                                            }
                                         }
+                                        // Payload::Arm { arm } => {
+                                        //     // 处理机臂控制请求
+                                        //     log::info!("收到 arm 请求: {}", arm);
+                                        //     if let Err(e) = mqtt_cmd_tx.send(MqttCommand::ArmDisarm { arm }).await {
+                                        //         log::error!("发送机臂控制命令失败: {}", e);
+                                        //     }
+                                        // }
+                                        // Payload::SetMode { mode } => {
+                                        //     // 处理设置飞行模式请求
+                                        //     log::info!("收到 set_mode 请求: {}", mode);
+                                        //     if let Err(e) = mavlink_actor_tx.send(MqttCommand::SetMode { mode }).await {
+                                        //         log::error!("发送设置飞行模式命令失败: {}", e);
+                                        //     }
+                                        // }
                                     }
                                 }
-                                // 其他 topic 可忽略或处理
-                            }
-                            Ok(Event::Incoming(other)) => {
-                                // 忽略其他类型事件（如 PubAck），或按需记录
-                                log::trace!("MQTT 其他事件: {:?}", other);
-                            }
-                            Ok(Event::Outgoing(_)) => {
-                                // 通常忽略 outgoing
-                            }
-                            Err(e) => {
-                                log::error!("MQTT 事件循环错误: {}", e);
-                                break;
+                                Err(e) => {
+                                    log::warn!("解析 payload 失败: {}，原始数据: {:?}", e, publish.payload);
+                                }
                             }
                         }
+                        // 其他 topic 可忽略或处理
                     }
-                    _ = tokio::signal::ctrl_c() => {
-                        log::info!("收到退出信号，正在关闭...");
+                    Ok(Event::Incoming(other)) => {
+                        // 忽略其他类型事件（如 PubAck），或按需记录
+                        log::trace!("MQTT 其他事件: {:?}", other);
+                    }
+                    Ok(Event::Outgoing(_)) => {
+                        // 通常忽略 outgoing
+                    }
+                    Err(e) => {
+                        log::error!("MQTT 事件循环错误: {}", e);
                         break;
                     }
                 }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                log::info!("收到退出信号，正在关闭...");
+                break;
+            }
+        }
     }
     publish_task.abort();
+    actor_handle.abort();
     Ok(())
 }
-
-fn mavlink_worker_thread(
-    conn_str: String,
-    tx: mpsc::Sender<(MavHeader, MavMessage)>, // 原消息上报通道
-    mut cmd_rx: mpsc::Receiver<MavlinkCommand>, // 命令接收通道
+/// 从飞控接收消息并发送到通道
+fn mavlink_receiver_thread(
+    conn: &Arc<Box<dyn MavConnection<MavMessage> + Send + Sync>>,
+    tx: mpsc::Sender<(MavHeader, MavMessage)>,
+    actor_tx: mpsc::Sender<MavlinkActorMessage>,
 ) -> Result<()> {
-    let vehicle = start_mavlink_thread(conn_str);
     let mut last_heartbeat = std::time::Instant::now();
-    // 发送参数请求和数据流请求
-    if let Err(e) = vehicle.send_default(&request_parameters()) {
-        log::error!("发送参数请求失败: {:?}", e);
-    }
-    if let Err(e) = vehicle.send_default(&request_stream()) {
-        log::error!("发送数据流请求失败: {:?}", e);
-    }
 
     loop {
-        // // 1. 定期发送心跳
+        // 1. 定期发送心跳
         if last_heartbeat.elapsed() >= Duration::from_secs(1) {
-            if let Err(e) = vehicle.send_default(&heartbeat_message()) {
+            if let Err(e) = conn.send_default(&heartbeat_message()) {
                 log::error!("心跳发送失败: {:?}", e);
             }
             last_heartbeat = std::time::Instant::now();
         }
-        match cmd_rx.try_recv() {
-            Ok(MavlinkCommand::RequestWaypointList) => {
-                log::info!("收到航点列表请求命令");
-                let req = MavMessage::MISSION_REQUEST_LIST(MISSION_REQUEST_LIST_DATA {
-                    target_system: 1,
-                    target_component: 1,
-                });
-                if let Err(e) = vehicle.send_default(&req) {
-                    log::error!("发送 MISSION_REQUEST_LIST 失败: {}", e);
-                }
-            }
-            Ok(MavlinkCommand::RequestWaypoint(seq)) => {
-                log::info!("收到航点请求命令，序号: {}", seq);
-                let req = MavMessage::MISSION_REQUEST_INT(MISSION_REQUEST_INT_DATA {
-                    target_system: 1,
-                    target_component: 1,
-                    seq,
-                });
-                if let Err(e) = vehicle.send_default(&req) {
-                    log::error!("发送 MISSION_REQUEST_INT 失败: {}", e);
-                }
-            }
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => break,
-        }
-        // }
 
-        // 3. 接收 MAVLink 消息（设置超时以避免完全阻塞命令响应）
-        match vehicle.try_recv() {
+        // 2. 接收 MAVLink 消息
+        match conn.recv() {
             Ok((header, msg)) => {
-                log::info!("mavlink 消息:{msg:?}");
-                if tx.blocking_send((header, msg)).is_err() {
-                    break; // 主线程退出
+                // 转发消息到主循环
+                if tx.blocking_send((header, msg.clone())).is_err() {
+                    log::warn!("主通道已关闭，退出接收线程");
+                    break;
                 }
-            }
 
-            Err(MessageReadError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // 没有新消息，休眠一小段时间避免 CPU 空转
-                thread::sleep(Duration::from_millis(1));
+                // 发送消息到 Actor
+                // 发送给 Actor（状态机）
+                if let Err(e) =
+                    actor_tx.blocking_send(MavlinkActorMessage::MavlinkMessage((header, msg)))
+                {
+                    log::error!("发送给 Actor 失败: {}", e);
+                    break;
+                }
             }
             Err(e) => {
-                log::error!("接收消息时发生致命错误: {:?}", e);
-                break;
+                log::error!("接收 MAVLink 消息失败: {:?}", e);
+                // 短暂休眠后继续，避免疯狂重试
+                thread::sleep(Duration::from_millis(100));
             }
         }
     }
@@ -308,7 +255,7 @@ fn mavlink_worker_thread(
 }
 
 fn start_mavlink_thread(
-    conn_str: String,
+    conn_str: &String,
 ) -> Arc<Box<dyn MavConnection<mavlink::ardupilotmega::MavMessage> + Send + Sync>> {
     let conn = mavlink::connect::<MavMessage>(&conn_str).expect("连接失败");
     log::info!("✅ 已连接到飞控: {}", conn_str);
@@ -362,37 +309,4 @@ fn setup_mqtt() -> Result<(AsyncClient, EventLoop)> {
     // 创建异步 MQTT 客户端和事件循环
     let (client, eventloop) = AsyncClient::new(mqtt_opts, 10);
     Ok((client, eventloop))
-}
-
-pub fn heartbeat_message() -> mavlink::ardupilotmega::MavMessage {
-    mavlink::ardupilotmega::MavMessage::HEARTBEAT(mavlink::ardupilotmega::HEARTBEAT_DATA {
-        custom_mode: 0,
-        mavtype: mavlink::ardupilotmega::MavType::MAV_TYPE_QUADROTOR,
-        autopilot: mavlink::ardupilotmega::MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA,
-        base_mode: mavlink::ardupilotmega::MavModeFlag::empty(),
-        system_status: mavlink::ardupilotmega::MavState::MAV_STATE_STANDBY,
-        mavlink_version: 0x3,
-    })
-}
-
-pub fn request_parameters() -> mavlink::ardupilotmega::MavMessage {
-    mavlink::ardupilotmega::MavMessage::PARAM_REQUEST_LIST(
-        mavlink::ardupilotmega::PARAM_REQUEST_LIST_DATA {
-            target_system: 1,
-            target_component: 1,
-        },
-    )
-}
-
-pub fn request_stream() -> mavlink::ardupilotmega::MavMessage {
-    #[expect(deprecated)]
-    mavlink::ardupilotmega::MavMessage::REQUEST_DATA_STREAM(
-        mavlink::ardupilotmega::REQUEST_DATA_STREAM_DATA {
-            target_system: 1,
-            target_component: 1,
-            req_stream_id: 0,
-            req_message_rate: 10,
-            start_stop: 1,
-        },
-    )
 }
