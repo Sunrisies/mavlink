@@ -4,7 +4,7 @@ use anyhow::Result;
 use logger::init_logger;
 use mavlink::{
     MavConnection, MavHeader, Message,
-    ardupilotmega::{MavMessage, MavModeFlag},
+    ardupilotmega::{MavAutopilot, MavMessage, MavModeFlag, MavState, MavType},
 };
 use rumqttc::v5::{
     AsyncClient, Event, EventLoop, MqttOptions,
@@ -30,8 +30,8 @@ enum Payload {
     GetList,
     #[serde(rename = "arm")]
     Arm { arm: bool },
-    // #[serde(rename = "set_mode")]
-    // SetMode { mode: String },
+    #[serde(rename = "set_mode")]
+    SetMode { mode: String },
 }
 
 #[tokio::main]
@@ -176,13 +176,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 log::error!("发送加解锁控制命令失败: {}", e);
                                             }
                                         }
-                                        // Payload::SetMode { mode } => {
-                                        //     // 处理设置飞行模式请求
-                                        //     log::info!("收到 set_mode 请求: {}", mode);
-                                        //     if let Err(e) = mavlink_actor_tx.send(MqttCommand::SetMode { mode }).await {
-                                        //         log::error!("发送设置飞行模式命令失败: {}", e);
-                                        //     }
-                                        // }
+                                        Payload::SetMode { mode } => {
+                                            // 处理设置飞行模式请求
+                                            log::info!("收到 set_mode 请求: {}", mode);
+                                            if let Err(e) = mavlink_actor_tx.send(MavlinkActorMessage::SetMode { mode }).await {
+                                                log::error!("发送设置飞行模式命令失败: {}", e);
+                                            }
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -285,40 +285,41 @@ async fn send_mqtt_data(
     // 将 MAVLink 消息转换为前端可理解的 JSON
     let payload = match msg {
         MavMessage::HEARTBEAT(data) => {
-            // 解析加锁/解锁状态
             let is_armed = data
                 .base_mode
                 .contains(MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED);
             let arm_status = if is_armed { "解锁" } else { "加锁" };
 
-            // 解析自动/手动模式
             let is_auto = data
                 .base_mode
                 .contains(MavModeFlag::MAV_MODE_FLAG_AUTO_ENABLED);
             let mode_type = if is_auto { "自动" } else { "手动" };
-
-            // 解析待机模式
             let is_standby = !is_armed && !is_auto;
 
-            // 解析具体飞行模式
-            let flight_mode = match data.mavtype {
-                mavlink::ardupilotmega::MavType::MAV_TYPE_QUADROTOR => "四旋翼",
-                mavlink::ardupilotmega::MavType::MAV_TYPE_GROUND_ROVER => "地面车辆",
-                mavlink::ardupilotmega::MavType::MAV_TYPE_FIXED_WING => "固定翼",
-                mavlink::ardupilotmega::MavType::MAV_TYPE_COAXIAL => "共轴直升机",
-                _ => "未知类型",
-            };
-
-            // 解析系统状态
-            let system_status = match data.system_status {
-                mavlink::ardupilotmega::MavState::MAV_STATE_UNINIT => "未初始化",
-                mavlink::ardupilotmega::MavState::MAV_STATE_BOOT => "启动中",
-                mavlink::ardupilotmega::MavState::MAV_STATE_CALIBRATING => "校准中",
-                mavlink::ardupilotmega::MavState::MAV_STATE_STANDBY => "待机",
-                mavlink::ardupilotmega::MavState::MAV_STATE_ACTIVE => "活动",
-                mavlink::ardupilotmega::MavState::MAV_STATE_CRITICAL => "严重故障",
-                mavlink::ardupilotmega::MavState::MAV_STATE_EMERGENCY => "紧急状态",
-                _ => "未知状态",
+            // 获取飞行模式名称（根据 custom_mode 和 autopilot 类型）
+            let flight_mode_name = match data.autopilot {
+                MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA => {
+                    // ArduPilot 模式映射
+                    match data.custom_mode {
+                        0 => "MANUAL",
+                        1 => "ACRO",
+                        3 => "STEERING",
+                        4 => "HOLD",
+                        5 => "LOITER",
+                        6 => "FOLLOW",
+                        7 => "SIMPLE",
+                        8 => "DOCK",
+                        9 => "CIRCLE",
+                        10 => "AUTO",
+                        11 => "RTL",
+                        12 => "SMART_RTL",
+                        15 => "GUIDED",
+                        16 => "INITIALISING",
+                        _ => "UNKNOWN",
+                    }
+                }
+                // 可以添加 PX4 等其他 autopilot 的映射
+                _ => "UNKNOWN",
             };
 
             json!({
@@ -330,7 +331,14 @@ async fn send_mqtt_data(
                 "message_type": "HEARTBEAT",
                 "data": {
                     "custom_mode": data.custom_mode,
-                    "mavtype": flight_mode,
+                    "flight_mode": flight_mode_name,          // 新增：可读模式名称
+                    "vehicle_type": match data.mavtype {      // 原来的 mavtype 改名为 vehicle_type
+                        MavType::MAV_TYPE_QUADROTOR => "四旋翼",
+                        MavType::MAV_TYPE_GROUND_ROVER => "地面车辆",
+                        MavType::MAV_TYPE_FIXED_WING => "固定翼",
+                        MavType::MAV_TYPE_COAXIAL => "共轴直升机",
+                        _ => "未知类型",
+                    },
                     "autopilot": format!("{:?}", data.autopilot),
                     "base_mode": {
                         "manual_input_enabled": data.base_mode.contains(MavModeFlag::MAV_MODE_FLAG_MANUAL_INPUT_ENABLED),
@@ -340,9 +348,17 @@ async fn send_mqtt_data(
                         "stabilize_enabled": data.base_mode.contains(MavModeFlag::MAV_MODE_FLAG_STABILIZE_ENABLED),
                         "hil_enabled": data.base_mode.contains(MavModeFlag::MAV_MODE_FLAG_HIL_ENABLED),
                     },
-                    "system_status": system_status,
+                    "system_status": match data.system_status {
+                        MavState::MAV_STATE_UNINIT => "未初始化",
+                        MavState::MAV_STATE_BOOT => "启动中",
+                        MavState::MAV_STATE_CALIBRATING => "校准中",
+                        MavState::MAV_STATE_STANDBY => "待机",
+                        MavState::MAV_STATE_ACTIVE => "活动",
+                        MavState::MAV_STATE_CRITICAL => "严重故障",
+                        MavState::MAV_STATE_EMERGENCY => "紧急状态",
+                        _ => "未知状态",
+                    },
                     "mavlink_version": data.mavlink_version,
-                    // 新增字段
                     "arm_status": arm_status,
                     "is_armed": is_armed,
                     "mode_type": mode_type,
@@ -392,7 +408,9 @@ async fn send_mqtt_data(
             })
         }
         _ => {
+            log::info!("msg:{msg:?}");
             // 对于其他消息类型，使用通用转换
+            let data_value = serde_json::to_value(msg)?;
             json!({
                 "header": {
                     "system_id": header.system_id,
@@ -400,7 +418,7 @@ async fn send_mqtt_data(
                     "sequence": header.sequence,
                 },
                 "message_type": msg.message_name(),
-                "data": format!("{:?}", msg),
+                "data": data_value,
             })
         }
     };

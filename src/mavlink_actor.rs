@@ -1,7 +1,7 @@
 use anyhow::Result;
-use mavlink::ardupilotmega::MavCmd::MAV_CMD_COMPONENT_ARM_DISARM;
+use mavlink::ardupilotmega::MavCmd::{MAV_CMD_COMPONENT_ARM_DISARM, MAV_CMD_DO_SET_MODE};
 use mavlink::ardupilotmega::{
-    COMMAND_LONG_DATA, MISSION_REQUEST_INT_DATA, MISSION_REQUEST_LIST_DATA,
+    COMMAND_LONG_DATA, CopterMode, MISSION_REQUEST_INT_DATA, MISSION_REQUEST_LIST_DATA, RoverMode,
 };
 use std::sync::Arc;
 
@@ -24,6 +24,7 @@ pub enum MavlinkActorMessage {
     RequestWaypointList,  // 请求航点列表
     RequestWaypoint(u16), // 请求指定序号的航点
     ArmDisarm { arm: bool },
+    SetMode { mode: String }, // 设置飞行模式
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 
@@ -74,6 +75,9 @@ impl MavlinkActor {
                         }
                         MavlinkActorMessage::ArmDisarm { arm } => {
                             self.handle_arm_disarm(arm).await?;
+                        }
+                        MavlinkActorMessage::SetMode { mode } => {
+                            self.handle_set_mode(mode).await?;
                         }
                     }
                 }
@@ -158,14 +162,6 @@ impl MavlinkActor {
             // 加解锁
             MavMessage::COMMAND_ACK(ack) => {
                 log::info!("收到解锁/上锁响应: {:?}", ack);
-                // match ack.result {
-                //     MAV_RESULT::MAV_RESULT_ACCEPTED => {
-                //         log::info!("解锁/上锁成功");
-                //     }
-                //     _ => {
-                //         log::error!("解锁/上锁失败: {:?}", ack.result);
-                //     }
-                // }
             }
             _ => {}
         }
@@ -218,6 +214,48 @@ impl MavlinkActor {
         if let Err(e) = self.vehicle.send_default(&msg) {
             log::error!("发送解锁/上锁命令失败: {}", e);
         }
+        Ok(())
+    }
+    async fn handle_set_mode(&mut self, mode: String) -> Result<()> {
+        log::info!("收到模式切换命令: {}", mode);
+        let mode_value = match mode.as_str() {
+            "MANUAL" => RoverMode::ROVER_MODE_MANUAL as u16,
+            "ACRO" => RoverMode::ROVER_MODE_ACRO as u16,
+            "STEERING" => RoverMode::ROVER_MODE_STEERING as u16,
+            "HOLD" => RoverMode::ROVER_MODE_HOLD as u16,
+            "LOITER" => RoverMode::ROVER_MODE_LOITER as u16,
+            "FOLLOW" => RoverMode::ROVER_MODE_FOLLOW as u16,
+            "SIMPLE" => RoverMode::ROVER_MODE_SIMPLE as u16,
+            "DOCK" => RoverMode::ROVER_MODE_DOCK as u16,
+            "CIRCLE" => RoverMode::ROVER_MODE_CIRCLE as u16,
+            "AUTO" => RoverMode::ROVER_MODE_AUTO as u16,
+            "RTL" => RoverMode::ROVER_MODE_RTL as u16,
+            "SMART_RTL" => RoverMode::ROVER_MODE_SMART_RTL as u16,
+            "GUIDED" => RoverMode::ROVER_MODE_GUIDED as u16,
+            "INITIALISING" => RoverMode::ROVER_MODE_INITIALIZING as u16,
+            _ => {
+                log::warn!("未知的飞行模式: {}", mode);
+                return Ok(());
+            }
+        };
+
+        let msg = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+            target_system: 1,             // 替换为你的飞控系统ID
+            target_component: 1,          // 飞控组件ID通常为1
+            command: MAV_CMD_DO_SET_MODE, // MAV_CMD_DO_SET_MODE 的命令编号
+            confirmation: 0,
+            param1: 1.0,               // 固定为1.0
+            param2: mode_value as f32, // 传入的模式编号
+            param3: 0.0,
+            param4: 0.0,
+            param5: 0.0,
+            param6: 0.0,
+            param7: 0.0,
+        });
+        log::info!("发送模式切换命令: {:?}", msg);
+        if let Err(e) = self.vehicle.send_default(&msg) {
+            log::error!("发送模式切换命令失败: {}", e);
+        };
         Ok(())
     }
 }
