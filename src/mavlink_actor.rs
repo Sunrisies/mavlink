@@ -1,8 +1,8 @@
 use anyhow::Result;
 use mavlink::ardupilotmega::MavCmd::{MAV_CMD_COMPONENT_ARM_DISARM, MAV_CMD_DO_SET_MODE};
 use mavlink::ardupilotmega::{
-    COMMAND_LONG_DATA, CopterMode, MISSION_ITEM_INT_DATA, MISSION_REQUEST_DATA,
-    MISSION_REQUEST_INT_DATA, MISSION_REQUEST_LIST_DATA, RoverMode,
+    COMMAND_LONG_DATA, MISSION_ITEM_INT_DATA, MISSION_REQUEST_INT_DATA, MISSION_REQUEST_LIST_DATA,
+    RoverMode,
 };
 use std::sync::Arc;
 
@@ -27,8 +27,7 @@ pub struct WaypointWrite {
 pub enum MavlinkActorMessage {
     // MAVLink 消息
     MavlinkMessage((MavHeader, MavMessage)),
-    RequestWaypointList,  // 请求航点列表
-    RequestWaypoint(u16), // 请求指定序号的航点
+    RequestWaypointList, // 请求航点列表
     ArmDisarm { arm: bool },
     SetMode { mode: String },                     // 设置飞行模式
     SetWaypointList { waypoints: Vec<Waypoint> }, // 设置航点列表
@@ -85,10 +84,6 @@ impl MavlinkActor {
                             // 处理航点列表请求
                             self.handle_request_waypoint_list().await?;
                         }
-                        MavlinkActorMessage::RequestWaypoint(seq) => {
-                            // 处理航点请求
-                            self.handle_request_waypoint(seq).await?;
-                        }
                         MavlinkActorMessage::ArmDisarm { arm } => {
                             self.handle_arm_disarm(arm).await?;
                         }
@@ -108,7 +103,7 @@ impl MavlinkActor {
         // 根据消息类型处理状态转换
         match msg {
             MavMessage::MISSION_COUNT(cnt) => {
-                log::debug!("航点数量:{cnt:?}");
+                log::info!("航点数量:{cnt:?}");
                 self.state = match self.state {
                     MissionState::WaitingCount => {
                         if cnt.count == 0 {
@@ -135,7 +130,7 @@ impl MavlinkActor {
                 };
             }
             MavMessage::MISSION_ITEM_INT(item) => {
-                log::debug!("航点信息:{item:?}");
+                log::info!("航点信息:{item:?}");
                 self.state = match std::mem::take(&mut self.state) {
                     MissionState::Downloading {
                         expected_count,
@@ -176,11 +171,11 @@ impl MavlinkActor {
             }
             // HEARTBEAT
             MavMessage::HEARTBEAT(heartbeat) => {
-                log::debug!("收到心跳: {:?}", heartbeat);
+                log::info!("收到心跳: {heartbeat:?}");
             }
             // 处理上传航点时的MISSION_REQUEST消息
             MavMessage::MISSION_REQUEST(req) => {
-                log::debug!("收到航点请求: {:?}-----", req);
+                log::info!("收到航点请求: {req:?}");
                 self.state = match std::mem::take(&mut self.state) {
                     MissionState::Uploading {
                         waypoints,
@@ -205,7 +200,6 @@ impl MavlinkActor {
                                 y: (wp.lon * 1e7) as i32,
                                 z: wp.alt,
                             });
-                            log::debug!("发送航点: {wp:?}");
                             if let Err(e) = self.vehicle.send_default(&item) {
                                 log::error!("发送航点失败: {}", e);
                                 MissionState::Idle
@@ -222,13 +216,9 @@ impl MavlinkActor {
                     other => other, // 保持其他状态不变
                 };
             }
-            // MavMessage::MISSION_REQUEST(req) => {
-            //     log::debug!("收到航点请求: {:?}", req);
-            // }
-
             // 加解锁
             MavMessage::COMMAND_ACK(ack) => {
-                log::debug!("收到解锁/上锁响应: {:?}", ack);
+                // log::info!("收到解锁/上锁响应: {ack:?}");
             }
             _ => {}
         }
@@ -237,8 +227,7 @@ impl MavlinkActor {
     }
 
     async fn handle_set_waypoint_list(&mut self, waypoints: Vec<Waypoint>) -> Result<()> {
-        log::debug!("收到设置航点列表请求，共 {} 个航点", waypoints.len());
-
+        log::info!("收到设置航点列表请求，共 {} 个航点", waypoints.len());
         // 清除现有航点
         let clear_msg =
             MavMessage::MISSION_CLEAR_ALL(mavlink::ardupilotmega::MISSION_CLEAR_ALL_DATA {
@@ -273,7 +262,7 @@ impl MavlinkActor {
     }
 
     async fn handle_request_waypoint_list(&mut self) -> Result<()> {
-        log::debug!("收到航点列表请求命令");
+        log::info!("收到航点列表请求命令");
         let req = MavMessage::MISSION_REQUEST_LIST(MISSION_REQUEST_LIST_DATA {
             target_system: 1,
             target_component: 1,
@@ -286,20 +275,8 @@ impl MavlinkActor {
         Ok(())
     }
 
-    async fn handle_request_waypoint(&mut self, seq: u16) -> Result<()> {
-        log::debug!("收到航点请求命令，序号: {}", seq);
-        let req = MavMessage::MISSION_REQUEST_INT(MISSION_REQUEST_INT_DATA {
-            target_system: 1,
-            target_component: 1,
-            seq,
-        });
-        if let Err(e) = self.vehicle.send_default(&req) {
-            log::error!("发送 MISSION_REQUEST_INT 失败: {}", e);
-        }
-        Ok(())
-    }
     async fn handle_arm_disarm(&mut self, arm: bool) -> Result<()> {
-        log::debug!("收到解锁/上锁命令: {}", arm);
+        log::info!("收到解锁/上锁命令: {}", arm);
         let msg = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
             target_system: 1,                      // 动态获取或配置
             target_component: 1,                   // 飞控组件 ID 通常为 1
@@ -313,14 +290,13 @@ impl MavlinkActor {
             param6: 0.0,
             param7: 0.0,
         });
-        log::debug!("发送解锁/上锁命令: {:?}", msg);
         if let Err(e) = self.vehicle.send_default(&msg) {
             log::error!("发送解锁/上锁命令失败: {}", e);
         }
         Ok(())
     }
     async fn handle_set_mode(&mut self, mode: String) -> Result<()> {
-        log::debug!("收到模式切换命令: {}", mode);
+        log::info!("收到模式切换命令: {}", mode);
         let mode_value = match mode.as_str() {
             "MANUAL" => RoverMode::ROVER_MODE_MANUAL as u16,
             "ACRO" => RoverMode::ROVER_MODE_ACRO as u16,
@@ -355,7 +331,6 @@ impl MavlinkActor {
             param6: 0.0,
             param7: 0.0,
         });
-        log::debug!("发送模式切换命令: {:?}", msg);
         if let Err(e) = self.vehicle.send_default(&msg) {
             log::error!("发送模式切换命令失败: {}", e);
         };

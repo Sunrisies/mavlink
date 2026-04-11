@@ -12,7 +12,11 @@ use rumqttc::v5::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::{sync::Arc, thread, time::Duration};
+use std::{
+    sync::Arc,
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::mpsc::{self};
 use tokio::task;
 
@@ -491,7 +495,15 @@ fn setup_mqtt() -> Result<(AsyncClient, EventLoop)> {
     let mqtt_host = String::from("101.200.223.8");
     let mqtt_port = 1883;
     // 设置 MQTT 连接选项
-    let mut mqtt_opts = MqttOptions::new("mavlink_forwarder", mqtt_host, mqtt_port);
+    // 生成随机数作为客户端 ID 的一部分
+    let client_id = format!(
+        "mavlink_forwarder_{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    );
+    let mut mqtt_opts = MqttOptions::new(client_id, mqtt_host, mqtt_port);
     mqtt_opts.set_keep_alive(Duration::from_secs(5));
     mqtt_opts.set_max_packet_size(Some(10 * 1024 * 1024));
     // 创建异步 MQTT 客户端和事件循环
