@@ -11,11 +11,6 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
-    HelloWorld: typeof import('./src/components/HelloWorld.vue')['default']
-    NButton: typeof import('naive-ui')['NButton']
     NCard: typeof import('naive-ui')['NCard']
-    NDataTable: typeof import('naive-ui')['NDataTable']
-    NSelect: typeof import('naive-ui')['NSelect']
-    NTag: typeof import('naive-ui')['NTag']
   }
 }

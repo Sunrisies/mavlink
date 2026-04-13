@@ -114,6 +114,16 @@ const waypointsColumns = [
   { title: "高度(m)", key: "alt" }
 ]
 
+// 新增：将监控数据以卡片形式整理，便于 Naive UI 展示
+const metricCards = computed(() => [
+  { label: "横滚", value: telemetry.roll_deg != null ? `${telemetry.roll_deg.toFixed(1)}°` : "--" },
+  { label: "俯仰", value: telemetry.pitch_deg != null ? `${telemetry.pitch_deg.toFixed(1)}°` : "--" },
+  { label: "偏航", value: telemetry.yaw_deg != null ? `${telemetry.yaw_deg.toFixed(1)}°` : "--" },
+  { label: "航向", value: telemetry.heading != null ? `${telemetry.heading.toFixed(0)}°` : "--" },
+  { label: "地速", value: telemetry.groundspeed != null ? `${telemetry.groundspeed.toFixed(1)} m/s` : "--" },
+  { label: "高度", value: telemetry.relative_alt != null ? `${(telemetry.relative_alt / 1000).toFixed(1)} m` : "--" }
+])
+
 // 辅助函数
 function extractNumber(value: any, defaultValue: number | null = null): number | null {
   if (value === undefined || value === null) return defaultValue
@@ -213,7 +223,7 @@ function processMavlinkMessage(payloadStr: string) {
         if (data.battery_remaining !== undefined) telemetry.battery_remaining = extractNumber(data.battery_remaining)
         if (data.current_consumed !== undefined) telemetry.consumed = extractNumber(data.current_consumed)
         break
-      case "GPS_RAW_INT":
+      case "GPS_RAW_INT": {
         let latVal = extractNumber(data.lat)
         let lonVal = extractNumber(data.lon)
         if (latVal !== null) telemetry.lat = latVal
@@ -222,6 +232,7 @@ function processMavlinkMessage(payloadStr: string) {
         telemetry.satellites = extractNumber(data.satellites_visible)
         telemetry.eph = extractNumber(data.eph)
         break
+      }
       // ========== 适配后端新结构 ==========
       case "HEARTBEAT":
         // 1. 解锁状态：直接使用 is_armed 布尔值
@@ -321,6 +332,7 @@ function setMode(modeName) {
 
 // ========== 航线读取逻辑（空闲超时） ==========
 let idleTimer: NodeJS.Timeout | null = null
+let rateUpdateTimer: NodeJS.Timeout | null = null
 
 function updateWaypointStats() {
   const elapsed = (Date.now() - waypointsStartTime.value) / 1000
@@ -328,6 +340,22 @@ function updateWaypointStats() {
   waypointStats.elapsed = elapsed
   waypointStats.received = received
   waypointStats.rate = elapsed > 0 && received > 0 ? received / elapsed : 0
+}
+
+function startRateUpdater() {
+  if (rateUpdateTimer) clearInterval(rateUpdateTimer)
+  rateUpdateTimer = setInterval(() => {
+    if (isLoadingWaypoints.value) {
+      updateWaypointStats()
+    }
+  }, 200)
+}
+
+function stopRateUpdater() {
+  if (rateUpdateTimer) {
+    clearInterval(rateUpdateTimer)
+    rateUpdateTimer = null
+  }
 }
 
 function renderWaypointTable() {
@@ -372,6 +400,7 @@ function resetIdleTimer() {
 function finishWaypointLoading(message: string, isError = false) {
   if (!isLoadingWaypoints.value) return
   isLoadingWaypoints.value = false
+  stopRateUpdater()
   if (idleTimer) {
     clearTimeout(idleTimer)
     idleTimer = null
@@ -413,8 +442,9 @@ function startFetchWaypoints() {
   waypointsMap.value.clear()
   expectedTotal.value = 0
   waypointsStartTime.value = Date.now()
-  waypointStats.status = "⏳ 正在请求航线数据..."
+  waypointStats.status = "正在请求航线数据..."
   updateWaypointStats()
+  startRateUpdater()
   resetIdleTimer()
 
   if (client && client.connected) {
@@ -499,215 +529,264 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="min-h-screen bg-gray-900 text-white p-6">
-    <!-- 头部 -->
-    <div class="flex justify-between items-center mb-6">
-      <div>
-        <h1 class="text-2xl font-bold mb-2">🛩️ MAVLink 遥测 + 航线读取 + 飞控控制</h1>
-        <p class="text-gray-400 text-sm">左右布局 | 加锁/解锁 | 模式切换 | 适配后端 HEARTBEAT 结构</p>
-      </div>
-      <div class="flex items-center gap-4">
-        <div class="flex items-center gap-2">
-          <div
-            :class="[
-              'w-3 h-3 rounded-full',
-              connectionStatus === 'online'
-                ? 'bg-green-500'
-                : connectionStatus === 'connecting'
-                  ? 'bg-yellow-500'
-                  : connectionStatus === 'error'
-                    ? 'bg-red-500'
-                    : 'bg-gray-500'
-            ]"
-          ></div>
-          <span>{{
-            connectionStatus === "online"
-              ? "在线"
-              : connectionStatus === "connecting"
-                ? "连接中"
-                : connectionStatus === "error"
-                  ? "错误"
-                  : "离线"
-          }}</span>
+  <div class="min-h-screen px-6 py-4 flex flex-col">
+    <div class="flex justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-8 h-8 rounded" style="background: #111; display: flex; align-items: center; justify-content: center">
+          <span class="text-white text-sm">✈</span>
         </div>
-        <div class="bg-gray-800 px-3 py-1 rounded text-sm">{{ lastUpdateTime }}</div>
+        <span class="text-lg" style="font-family: Saans, ui-sans-serif; letter-spacing: -0.48px">MAVLink 遥测监控</span>
+      </div>
+      <div class="flex items-center gap-2" style="display: flex; align-items: center; gap: 8px">
+        <span
+          class="w-2 h-2 rounded-full"
+          :style="{
+            background: connectionStatus === 'online' ? '#0bdf50' : connectionStatus === 'connecting' ? '#ff5600' : '#7b7b78'
+          }"
+        ></span>
+        <span style="color: #626260; font-size: 14px">
+          {{ connectionStatus === "online" ? "已连接" : connectionStatus === "connecting" ? "连接中" : "未连接" }}
+        </span>
       </div>
     </div>
 
-    <!-- 主内容区：左侧遥测 + 右侧控制 -->
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-      <!-- 左侧遥测数据卡片 (保持原有 Tailwind 样式，但内部未用 naive-ui 组件，不影响要求) -->
-      <div class="lg:col-span-2">
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <!-- 姿态角 -->
-          <div class="bg-gray-800 rounded-lg p-4">
-            <div class="text-gray-400 text-sm mb-2">🎯 姿态角</div>
-            <div class="text-2xl font-bold mb-1">
-              {{ telemetry.roll_deg ?? "---" }}° / {{ telemetry.pitch_deg ?? "---" }}° / {{ telemetry.yaw_deg ?? "---" }}°
-            </div>
-            <div class="text-gray-500 text-sm">横滚 / 俯仰 / 偏航</div>
-          </div>
+    <!-- 主内容 -->
+    <div class="flex-1 flex gap-3">
+      <!-- 左侧数据区 - 紧凑布局 -->
+      <div class="">
+        <div class="grid gap-3" style="grid-template-columns: repeat(6, 1fr)">
+          <!-- 横滚 -->
 
-          <!-- 速度 & 航向 -->
-          <div class="bg-gray-800 rounded-lg p-4">
-            <div class="text-gray-400 text-sm mb-2">🧭 速度 & 航向</div>
-            <div class="text-2xl font-bold mb-1">
-              {{ telemetry.groundspeed !== null ? telemetry.groundspeed.toFixed(2) : "---" }} m/s |
-              {{ telemetry.heading !== null ? telemetry.heading.toFixed(0) : "---" }}°
-            </div>
-            <div class="text-gray-500 text-sm">
-              空速: {{ telemetry.airspeed !== null ? telemetry.airspeed.toFixed(2) : "---" }} m/s 垂直速度:
-              {{ telemetry.climb !== null ? telemetry.climb.toFixed(2) : "---" }} m/s
-            </div>
-          </div>
+          <n-card size="small" title="横滚">
+            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">{{ telemetry.roll_deg ?? "--" }}°</div>
+          </n-card>
+          <!-- 俯仰 -->
 
-          <!-- 位置 & 高度 -->
-          <div class="bg-gray-800 rounded-lg p-4">
-            <div class="text-gray-400 text-sm mb-2">📍 位置 & 高度</div>
-            <div class="text-xl font-bold mb-1">
-              {{ telemetry.lat !== null ? (telemetry.lat / 1e7).toFixed(6) : "---" }},
-              {{ telemetry.lon !== null ? (telemetry.lon / 1e7).toFixed(6) : "---" }}
+          <n-card size="small" title="俯仰">
+            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">
+              {{ telemetry.pitch_deg ?? "--" }}°
             </div>
-            <div class="text-gray-500 text-sm">
-              相对高度: {{ telemetry.relative_alt !== null ? (telemetry.relative_alt / 1000).toFixed(1) : "---" }} m | 绝对高度:
-              {{ telemetry.alt_msl !== null ? (telemetry.alt_msl / 1000).toFixed(1) : "---" }} m
-            </div>
-          </div>
+          </n-card>
 
-          <!-- 电源状态 -->
-          <div class="bg-gray-800 rounded-lg p-4">
-            <div class="text-gray-400 text-sm mb-2">🔋 电源状态</div>
-            <div class="text-2xl font-bold mb-1">
-              {{ telemetry.voltage !== null ? (telemetry.voltage / 1000).toFixed(1) : "---" }}V |
-              {{ telemetry.current !== null ? (telemetry.current / 100).toFixed(1) : "---" }}A
-            </div>
-            <div class="text-gray-500 text-sm">
-              剩余电量: {{ telemetry.battery_remaining !== null ? telemetry.battery_remaining : "---" }}% 消耗:
-              {{ telemetry.consumed !== null ? telemetry.consumed : "---" }} mAh
-            </div>
-          </div>
+          <!-- 偏航 -->
+          <n-card size="small" title="偏航">
+            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">{{ telemetry.yaw_deg ?? "--" }}°</div>
+          </n-card>
 
-          <!-- GPS 定位 -->
-          <div class="bg-gray-800 rounded-lg p-4">
-            <div class="text-gray-400 text-sm mb-2">🛰️ GPS 定位</div>
+          <!-- 航向 -->
+          <n-card size="small" title="航向">
+            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">
+              {{ telemetry.heading?.toFixed(0) ?? "--" }}°
+            </div>
+          </n-card>
+
+          <!-- 地速 -->
+          <n-card size="small" title="地速">
+            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">
+              {{ telemetry.groundspeed?.toFixed(1) ?? "--" }}
+            </div>
+          </n-card>
+
+          <!-- 相对高度 -->
+          <n-card size="small" title="高度">
+            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">
+              {{ telemetry.relative_alt ? (telemetry.relative_alt / 1000).toFixed(1) : "--" }}
+            </div>
+          </n-card>
+
+          <!-- 电池电压 -->
+          <n-card size="small" title="电池">
+            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">
+              {{ telemetry.voltage ? (telemetry.voltage / 1000).toFixed(1) : "--" }}
+            </div>
+          </n-card>
+
+          <!-- 电量 -->
+          <n-card size="small" title="电量">
+            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">
+              {{ telemetry.battery_remaining ?? "--" }}%
+            </div>
+          </n-card>
+
+          <!-- GPS状态 -->
+          <n-card size="small" title="🛰️ GPS 定位">
             <div class="text-xl font-bold mb-1">{{ fixTypeText }}</div>
-            <div class="text-gray-500 text-sm">
-              🛸 卫星: {{ telemetry.satellites ?? 0 }} | 📡 EPH:
-              {{ telemetry.eph !== null ? (telemetry.eph / 100).toFixed(1) : "---" }} m
+            <div class="text-gray-500 text-sm">{{ telemetry.eph !== null ? (telemetry.eph / 100).toFixed(1) : "---" }} m</div>
+          </n-card>
+
+          <!-- 卫星数 -->
+          <n-card size="small" title="卫星">
+            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">
+              {{ telemetry.satellites ?? 0 }}
             </div>
-          </div>
+          </n-card>
 
-          <!-- 系统与EKF -->
-          <div class="bg-gray-800 rounded-lg p-4">
-            <div class="text-gray-400 text-sm mb-2">⚙️ 系统与EKF</div>
-            <div class="text-xl font-bold mb-1">{{ telemetry.armed ? "✅ 已解锁" : "🔒 已上锁" }}</div>
-            <div class="text-gray-500 text-sm">飞行模式: {{ telemetry.mode }} | EKF: {{ ekfStatusText }}</div>
-          </div>
-
-          <!-- 任务信息 -->
-          <div class="bg-gray-800 rounded-lg p-4">
-            <div class="text-gray-400 text-sm mb-2">📌 任务信息</div>
-            <div class="text-2xl font-bold mb-1">{{ telemetry.mission_seq }} / {{ telemetry.mission_total }} 航点</div>
-            <div class="text-gray-500 text-sm">当前指令: {{ telemetry.current_cmd || "--" }}</div>
-          </div>
-
-          <!-- 振动监测 -->
-          <div class="bg-gray-800 rounded-lg p-4">
-            <div class="text-gray-400 text-sm mb-2">📳 振动监测</div>
-            <div class="text-lg font-bold mb-1">
-              X: {{ telemetry.vib.x.toFixed(3) }} | Y: {{ telemetry.vib.y.toFixed(3) }} | Z: {{ telemetry.vib.z.toFixed(3) }}
+          <!-- 锁定状态 -->
+          <n-card size="small" title="锁定">
+            <div
+              class="text-base font-semibold"
+              :style="{ color: telemetry.armed ? '#0bdf50' : '#fe4c02', fontFamily: 'Saans, ui-sans-serif' }"
+            >
+              {{ telemetry.armed ? "已解锁" : "已锁定" }}
             </div>
-            <div class="text-gray-500 text-sm">单位: G</div>
-          </div>
+          </n-card>
 
-          <!-- 环境 & 负载 -->
-          <div class="bg-gray-800 rounded-lg p-4">
-            <div class="text-gray-400 text-sm mb-2">🌡️ 环境 & 负载</div>
-            <div class="text-2xl font-bold mb-1">
-              {{ telemetry.temperature !== null ? (telemetry.temperature / 100).toFixed(1) : "---" }}°C |
-              {{ telemetry.press_abs !== null ? telemetry.press_abs.toFixed(1) : "---" }} hPa
+          <!-- 飞行模式 -->
+          <n-card size="small" title="模式">
+            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">{{ telemetry.mode }}</div>
+          </n-card>
+          <n-card size="small" title="位置坐标">
+            <div class="text-sm font-mono" style="font-family: ui-monospace">
+              {{ telemetry.lat ? (telemetry.lat / 1e7).toFixed(6) : "--" }},
+              {{ telemetry.lon ? (telemetry.lon / 1e7).toFixed(6) : "--" }}
             </div>
-            <div class="text-gray-500 text-sm">CPU负载: {{ telemetry.load ?? "---" }}%</div>
-          </div>
+          </n-card>
         </div>
       </div>
 
-      <!-- 右侧：飞控控制 + 航线读取（使用 Naive UI 组件） -->
-      <div class="space-y-6">
-        <!-- 飞控控制卡片 -->
-        <n-card title="🎮 飞控控制" :bordered="false" class="bg-gray-800 text-white shadow-lg">
-          <div class="space-y-4">
-            <div class="flex gap-2">
-              <n-button type="success" @click="arm" strong secondary class="flex-1">🔓 解锁</n-button>
-              <n-button type="error" @click="disarm" strong secondary class="flex-1">🔒 加锁</n-button>
-            </div>
-            <div class="flex gap-2">
-              <n-select v-model:value="selectedMode" :options="flightModeOptions" class="flex-1" size="medium" />
-              <n-button type="primary" @click="setMode(selectedMode)" class="flex-1">✈️ 切换模式</n-button>
-            </div>
-            <div class="text-sm text-gray-400">
-              当前状态:
-              <n-tag :type="telemetry.armed ? 'success' : 'error'" size="small">
-                {{ telemetry.armed ? "已解锁" : "已上锁" }}
-              </n-tag>
-              | 当前模式:
-              <n-tag type="info" size="small">{{ telemetry.mode }}</n-tag>
-            </div>
+      <!-- 右侧控制区 - 加宽 -->
+      <div class="flex-1">
+        <!-- 解锁/加锁 -->
+        <div class="p-4 rounded-lg" style="background: #ffffff; border: 1px solid #dedbd6">
+          <div class="text-xs uppercase mb-3" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">
+            飞控控制
           </div>
-        </n-card>
-
-        <!-- 航线读取工具卡片 -->
-        <n-card title="🗺️ 航线读取工具" :bordered="false" class="bg-gray-800 text-white shadow-lg">
-          <div class="space-y-4">
-            <div class="flex gap-2">
-              <n-button
-                type="primary"
-                @click="startFetchWaypoints"
-                :loading="isLoadingWaypoints"
-                :disabled="isLoadingWaypoints"
-                class="flex-1"
-              >
-                📥 读取航线
-              </n-button>
-              <n-button type="default" @click="stopFetchWaypoints" :disabled="!isLoadingWaypoints" class="flex-1">
-                ⏹️ 停止接收
-              </n-button>
-            </div>
-            <div class="grid grid-cols-3 gap-2 text-sm text-gray-400">
-              <div>⏱️ 耗时: {{ waypointStats.elapsed.toFixed(2) }}s</div>
-              <div>📦 航点: {{ waypointStats.received }} / {{ expectedTotal || waypointStats.received }}</div>
-              <div>⚡ 速率: {{ waypointStats.rate.toFixed(2) }}点/秒</div>
-            </div>
-            <div
-              class="text-sm"
-              :class="{
-                'text-red-400': waypointStats.status.includes('错误'),
-                'text-green-400': waypointStats.status.includes('完成'),
-                'text-yellow-400': !waypointStats.status.includes('错误') && !waypointStats.status.includes('完成')
-              }"
+          <div class="flex gap-2">
+            <button
+              @click="arm"
+              class="flex-1 py-2 rounded text-white text-sm font-semibold transition-transform hover:scale-105"
+              style="background: #111111; border-radius: 4px"
             >
-              {{ waypointStats.status || "" }}
+              解锁
+            </button>
+            <button
+              @click="disarm"
+              class="flex-1 py-2 rounded text-sm font-semibold transition-transform hover:scale-105"
+              style="background: #ffffff; color: #111111; border: 1px solid #111111; border-radius: 4px"
+            >
+              加锁
+            </button>
+          </div>
+        </div>
+
+        <!-- 模式切换 -->
+        <div class="p-4 rounded-lg" style="background: #ffffff; border: 1px solid #dedbd6">
+          <div class="text-xs uppercase mb-3" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">
+            飞行模式
+          </div>
+          <div class="flex gap-2">
+            <select
+              v-model="selectedMode"
+              class="flex-1 px-2 py-1.5 rounded text-sm"
+              style="border: 1px solid #dedbd6; border-radius: 4px"
+            >
+              <option v-for="m in flightModeOptions" :key="m.value" :value="m.value">{{ m.label }}</option>
+            </select>
+            <button
+              @click="setMode(selectedMode)"
+              class="px-4 py-1.5 rounded text-white text-sm font-semibold transition-transform hover:scale-105"
+              style="background: #ff5600; border-radius: 4px"
+            >
+              切换
+            </button>
+          </div>
+        </div>
+
+        <!-- 航线读取 -->
+        <div class="p-4 rounded-lg" style="background: #ffffff; border: 1px solid #dedbd6">
+          <div class="text-xs uppercase mb-3" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">
+            航线读取
+          </div>
+          <div class="flex gap-2 mb-3">
+            <button
+              @click="startFetchWaypoints"
+              :disabled="isLoadingWaypoints"
+              class="flex-1 py-2 rounded text-white text-sm font-semibold transition-transform hover:scale-105 disabled:opacity-50"
+              style="background: #111111; border-radius: 4px"
+            >
+              {{ isLoadingWaypoints ? "读取中" : "读取航线" }}
+            </button>
+            <button
+              @click="stopFetchWaypoints"
+              :disabled="!isLoadingWaypoints"
+              class="flex-1 py-2 rounded text-sm transition-transform hover:scale-105 disabled:opacity-50"
+              style="background: #faf9f6; border: 1px solid #dedbd6; border-radius: 4px"
+            >
+              停止
+            </button>
+          </div>
+          <!-- 实时速度显示 -->
+          <div class="grid grid-cols-3 gap-2 mb-2">
+            <div class="text-center p-2 rounded" style="background: #faf9f6">
+              <div class="text-xs uppercase" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">已读取</div>
+              <div class="text-sm font-semibold" style="font-family: Saans, ui-sans-serif">{{ waypointStats.received }}</div>
+            </div>
+            <div class="text-center p-2 rounded" style="background: #faf9f6">
+              <div class="text-xs uppercase" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">耗时</div>
+              <div class="text-sm font-semibold" style="font-family: Saans, ui-sans-serif">
+                {{ waypointStats.elapsed.toFixed(1) }}s
+              </div>
+            </div>
+            <div class="text-center p-2 rounded" style="background: #faf9f6">
+              <div class="text-xs uppercase" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">速度</div>
+              <div class="text-sm font-semibold" style="font-family: Saans, ui-sans-serif; color: #ff5600">
+                {{ waypointStats.rate.toFixed(1) }}/s
+              </div>
             </div>
           </div>
+          <div v-if="waypointStats.status" style="color: #7b7b78; font-size: 12px">{{ waypointStats.status }}</div>
+        </div>
 
-          <!-- 航点表格 (Naive UI Data Table) -->
-          <n-data-table
-            :columns="waypointColumns"
-            :data="waypoints"
-            :pagination="false"
-            :bordered="false"
-            class="mt-4"
-            :row-key="(row) => row.seq"
-            size="small"
-          />
-          <div v-if="waypoints.length === 0" class="text-center text-gray-400 py-4">暂无数据，点击“读取航线”</div>
-        </n-card>
+        <!-- 航点列表 -->
+        <div class="p-4 rounded-lg" style="background: #ffffff; border: 1px solid #dedbd6">
+          <div class="text-xs uppercase mb-3" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">
+            航点列表
+          </div>
+          <div class="max-h-96 overflow-y-auto rounded" style="border: 1px solid #dedbd6">
+            <table class="w-full text-xs">
+              <thead style="background: #faf9f6">
+                <tr>
+                  <th
+                    class="px-2 py-2 text-left uppercase"
+                    style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace"
+                  >
+                    #
+                  </th>
+                  <th
+                    class="px-2 py-2 text-left uppercase"
+                    style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace"
+                  >
+                    纬度
+                  </th>
+                  <th
+                    class="px-2 py-2 text-left uppercase"
+                    style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace"
+                  >
+                    经度
+                  </th>
+                  <th
+                    class="px-2 py-2 text-left uppercase"
+                    style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace"
+                  >
+                    高度
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="wp in waypointsData" :key="wp.key" style="border-top: 1px solid #dedbd6">
+                  <td class="px-2 py-2" style="color: #111111">{{ wp.seq }}</td>
+                  <td class="px-2 py-2 font-mono" style="color: #626260">{{ wp.lat }}</td>
+                  <td class="px-2 py-2 font-mono" style="color: #626260">{{ wp.lon }}</td>
+                  <td class="px-2 py-2" style="color: #626260">{{ wp.alt }}m</td>
+                </tr>
+                <tr v-if="waypointsData.length === 0">
+                  <td colspan="4" class="px-2 py-4 text-center" style="color: #7b7b78">暂无数据</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
-    </div>
-
-    <!-- 页脚 -->
-    <div class="mt-6 text-center text-gray-500 text-sm">
-      空闲超时: 5秒内无新航点自动结束 | 加锁/解锁/模式切换通过 MQTT send 频道 | 实时显示状态
     </div>
   </div>
 </template>
