@@ -3,7 +3,6 @@ import mqtt from "mqtt"
 import { ref, reactive, onMounted, computed, onBeforeUnmount } from "vue"
 import * as L from "leaflet"
 import type { LatLngExpression } from "leaflet"
-// const map = ref<LMap | null>(null)
 let LMap: L.Map | null = null
 const init = () => {
   LMap = L.map("leaf_map", {
@@ -54,9 +53,9 @@ const connectionStatus = ref<"connecting" | "online" | "offline" | "error">("con
 const lastUpdateTime = ref("--:--:--")
 
 const telemetry = reactive({
-  roll_deg: null as number | null,
-  pitch_deg: null as number | null,
-  yaw_deg: null as number | null,
+  roll_deg: null as string | null,
+  pitch_deg: null as string | null,
+  yaw_deg: null as string | null,
   groundspeed: null as number | null,
   airspeed: null as number | null,
   heading: null as number | null,
@@ -204,14 +203,14 @@ function processMavlinkMessage(payloadStr: string) {
         if (data.roll !== undefined) telemetry.roll_deg = radToDeg(extractNumber(data.roll))
         if (data.pitch !== undefined) telemetry.pitch_deg = radToDeg(extractNumber(data.pitch))
         if (data.yaw !== undefined) telemetry.yaw_deg = radToDeg(extractNumber(data.yaw))
-        if (data.altitude !== undefined) telemetry.relative_alt = extractNumber(data.altitude) * 1000
+        if (data.altitude !== undefined) telemetry.relative_alt = extractNumber(data.altitude)! * 1000
         break
       case "VFR_HUD":
         if (data.airspeed !== undefined) telemetry.airspeed = extractNumber(data.airspeed)
         if (data.groundspeed !== undefined) telemetry.groundspeed = extractNumber(data.groundspeed)
         if (data.heading !== undefined) telemetry.heading = extractNumber(data.heading)
         if (data.climb !== undefined) telemetry.climb = extractNumber(data.climb)
-        if (data.alt !== undefined) telemetry.relative_alt = extractNumber(data.alt) * 1000
+        if (data.alt !== undefined) telemetry.relative_alt = extractNumber(data.alt)! * 1000
         break
       case "GLOBAL_POSITION_INT":
         if (data.lat !== undefined) {
@@ -269,7 +268,6 @@ function processMavlinkMessage(payloadStr: string) {
         } else if (data.mode_type !== undefined) {
           telemetry.mode = extractString(data.mode_type, "未知")
         } else if (data.custom_mode !== undefined) {
-          let modeVal = extractNumber(data.custom_mode)
           // 简单映射一些常见模式（可根据需要扩展）
           const simpleModeMap = {
             0: "MANUAL",
@@ -281,11 +279,21 @@ function processMavlinkMessage(payloadStr: string) {
             6: "RTL",
             9: "LAND",
             16: "POSHOLD"
-          }
-          if (modeVal !== null && simpleModeMap[modeVal]) {
-            telemetry.mode = simpleModeMap[modeVal]
+          } as const
+          type SimpleModeMap = typeof simpleModeMap
+          type ModeValue = keyof SimpleModeMap
+          let modeVal = extractNumber(data.custom_mode) as ModeValue | null
+          // 检查 modeVal 是否为 null，并且是否存在于 simpleModeMap 中
+          if (modeVal !== null) {
+            // 将 modeVal 转换为 ModeValue 类型，并检查是否存在于 simpleModeMap 中
+            const modeKey = modeVal as unknown as ModeValue
+            if (modeKey in simpleModeMap) {
+              telemetry.mode = simpleModeMap[modeKey]
+            } else {
+              telemetry.mode = `模式${modeVal}`
+            }
           } else {
-            telemetry.mode = modeVal !== null ? `模式${modeVal}` : "未知"
+            telemetry.mode = "未知"
           }
         }
         break
