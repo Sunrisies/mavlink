@@ -1,7 +1,47 @@
 <script setup lang="ts">
 import mqtt from "mqtt"
 import { ref, reactive, onMounted, computed, onBeforeUnmount } from "vue"
+import * as L from "leaflet"
+import type { LatLngExpression } from "leaflet"
+// const map = ref<LMap | null>(null)
+let LMap: L.Map | null = null
+const init = () => {
+  LMap = L.map("leaf_map", {
+    center: [30.5217, 114.3948],
+    zoom: 13,
+    minZoom: 1,
+    maxZoom: 21, //限制显示地理范围
+    maxBounds: L.latLngBounds(L.latLng(-180, -180), L.latLng(180, 180))
+  })
 
+  addTMap(LMap, "img")
+  addTMap(LMap, "cva") //定义一个比例尺控件
+  var scale = L.control.scale()
+  //将比例尺加载到地图容器中
+  LMap.addControl(scale)
+}
+type TMapType = "vec" | "cva" | "img" | "cia" | "ter" | "cta" | "ibo" | "eva" | "eia"
+
+/**
+ * 为cesium添加天地图的底图
+ * @param map
+ * @param layer
+ * vec：矢量底图、cva：矢量标注、img：影像底图、cia：影像标注
+ * ter：地形晕渲、cta：地形标注、eva：矢量英文标注、eia：影像英文标注
+ */
+function addTMap(map: L.Map, layer: TMapType) {
+  // 添加天地图影像注记底图 d434002ddef854e56c24ce68e885a55b
+  const cvaLayer = L.tileLayer(
+    `http://t0.tianditu.gov.cn/DataServer?T=${layer}_w&x={x}&y={y}&l={z}&tk=6460c0045a3ab09f33e9f40c2d1d36a4`,
+    {
+      noWrap: true
+    }
+  )
+  return cvaLayer.addTo(map)
+}
+onMounted(() => {
+  init()
+})
 // ========== MQTT 配置 ==========
 const BROKER = "ws://101.200.223.8:8083/mqtt"
 const TOPIC_MAVLINK = "mavlink/incoming"
@@ -43,7 +83,12 @@ const telemetry = reactive({
   press_abs: null as number | null,
   load: null as number | null
 })
-
+interface Waypoint {
+  seq: number
+  lat: number
+  lon: number
+  alt: number
+}
 // 航点相关状态
 const isLoadingWaypoints = ref(false)
 const waypointsMap = ref<Map<number, Waypoint>>(new Map())
@@ -56,23 +101,17 @@ const waypointStats = reactive({
   status: ""
 })
 
-interface Waypoint {
-  seq: number
-  lat: number
-  lon: number
-  alt: number
-}
-
 // 飞行模式选项
 const flightModeOptions = [
-  { label: "手动模式 (MANUAL)", value: "MANUAL" },
-  { label: "定高模式 (ALT_HOLD)", value: "ALT_HOLD" },
-  { label: "悬停模式 (HOLD)", value: "HOLD" },
-  { label: "自动模式 (AUTO)", value: "AUTO" },
-  { label: "返航模式 (RTL)", value: "RTL" },
-  { label: "降落模式 (LAND)", value: "LAND" },
-  { label: "特技模式 (ACRO)", value: "ACRO" },
-  { label: "位置保持 (POSHOLD)", value: "POSHOLD" }
+  { label: "手动模式", value: "MANUAL" },
+  { label: "定高模式", value: "ALT_HOLD" },
+  { label: "悬停模式", value: "HOLD" },
+  { label: "自动模式", value: "AUTO" },
+  { label: "返航模式", value: "RTL" },
+  { label: "降落模式", value: "LAND" },
+  { label: "特技模式", value: "ACRO" },
+  { label: "位置保持", value: "POSHOLD" },
+  { label: "跟随模式", value: "FOLLOW" } // 新增模式
 ]
 
 const selectedMode = ref("MANUAL")
@@ -91,10 +130,6 @@ const fixTypeText = computed(() => {
   return telemetry.fix_type !== null ? fixMap[telemetry.fix_type] || `类型${telemetry.fix_type}` : "无定位"
 })
 
-const ekfStatusText = computed(() => {
-  return telemetry.ekf_flags !== null ? (telemetry.ekf_flags & 0x01 ? "正常" : "异常") : "未知"
-})
-
 const waypointsData = computed(() => {
   return Array.from(waypointsMap.value.values())
     .sort((a, b) => a.seq - b.seq)
@@ -106,23 +141,6 @@ const waypointsData = computed(() => {
       alt: wp.alt.toFixed(2)
     }))
 })
-
-const waypointsColumns = [
-  { title: "序号", key: "seq" },
-  { title: "纬度", key: "lat" },
-  { title: "经度", key: "lon" },
-  { title: "高度(m)", key: "alt" }
-]
-
-// 新增：将监控数据以卡片形式整理，便于 Naive UI 展示
-const metricCards = computed(() => [
-  { label: "横滚", value: telemetry.roll_deg != null ? `${telemetry.roll_deg.toFixed(1)}°` : "--" },
-  { label: "俯仰", value: telemetry.pitch_deg != null ? `${telemetry.pitch_deg.toFixed(1)}°` : "--" },
-  { label: "偏航", value: telemetry.yaw_deg != null ? `${telemetry.yaw_deg.toFixed(1)}°` : "--" },
-  { label: "航向", value: telemetry.heading != null ? `${telemetry.heading.toFixed(0)}°` : "--" },
-  { label: "地速", value: telemetry.groundspeed != null ? `${telemetry.groundspeed.toFixed(1)} m/s` : "--" },
-  { label: "高度", value: telemetry.relative_alt != null ? `${(telemetry.relative_alt / 1000).toFixed(1)} m` : "--" }
-])
 
 // 辅助函数
 function extractNumber(value: any, defaultValue: number | null = null): number | null {
@@ -176,7 +194,6 @@ function processMavlinkMessage(payloadStr: string) {
     const obj = JSON.parse(payloadStr)
     const msgType = obj.message_type
     const data = obj.data || {}
-    console.log(obj, "===================")
     switch (msgType) {
       case "ATTITUDE":
         if (data.roll !== undefined) telemetry.roll_deg = radToDeg(extractNumber(data.roll))
@@ -213,7 +230,6 @@ function processMavlinkMessage(payloadStr: string) {
         if (data.voltage_battery !== undefined) telemetry.voltage = extractNumber(data.voltage_battery)
         if (data.current_battery !== undefined) telemetry.current = extractNumber(data.current_battery)
         if (data.battery_remaining !== undefined) telemetry.battery_remaining = extractNumber(data.battery_remaining)
-        console.log("负载", data)
         if (data.load !== undefined) telemetry.load = extractNumber(data.load)
         break
       case "BATTERY_STATUS":
@@ -358,35 +374,6 @@ function stopRateUpdater() {
   }
 }
 
-function renderWaypointTable() {
-  if (waypointsMap.value.size === 0) {
-    waypointTbody.innerHTML = '<tr><td colspan="4" style="text-align:center;">暂无数据，点击“读取航线”</td></tr>'
-    return
-  }
-  const sorted = Array.from(waypointsMap.values()).sort((a, b) => a.seq - b.seq)
-  let html = ""
-  for (let wp of sorted) {
-    html += `<tr>
-                        <td>${wp.seq}</td>
-                        <td>${wp.lat.toFixed(6)}</td>
-                        <td>${wp.lon.toFixed(6)}</td>
-                        <td>${wp.alt.toFixed(2)}</td>
-                     </tr>`
-  }
-  waypointTbody.innerHTML = html
-  if (tableContainer) tableContainer.scrollTop = tableContainer.scrollHeight
-
-  const elapsed = (Date.now() - waypointsStartTime) / 1000
-  const received = waypointsMap.size
-  waypointCountSpan.innerText = received
-  waypointTimeSpan.innerText = elapsed.toFixed(2)
-  if (elapsed > 0 && received > 0) {
-    waypointRateSpan.innerText = (received / elapsed).toFixed(2)
-  }
-  if (expectedTotal > 0) waypointTotalSpan.innerText = expectedTotal
-  else waypointTotalSpan.innerText = received
-}
-
 function resetIdleTimer() {
   if (!isLoadingWaypoints.value) return
   if (idleTimer) clearTimeout(idleTimer)
@@ -428,6 +415,50 @@ function handleWaypointMessage(msg: any) {
     resetIdleTimer()
 
     if (expectedTotal.value > 0 && waypointsMap.value.size >= expectedTotal.value) {
+      console.log(waypointsMap.value, "waypointsMap.value")
+      // 从 waypointsMap 中提取航点坐标，过滤掉 key 为 0 的点
+      const waypoints = Array.from(waypointsMap.value.entries())
+        .filter(([key]) => key !== 0) // 过滤掉 key 为 0 的点
+        .map(([key, wp]) => ({
+          key,
+          lat: wp.lat,
+          lon: wp.lon,
+          alt: wp.alt
+        }))
+      if (!LMap) {
+        return
+      }
+      // 创建一个图层组来存放所有航点标记
+      const waypointsLayer = L.layerGroup().addTo(LMap)
+
+      // 使用 CircleMarker 代替普通 marker，性能更好
+      waypoints.forEach((wp) => {
+        const circleMarker = L.circleMarker([wp.lat, wp.lon], {
+          radius: 5,
+          fillColor: "#ff7800",
+          color: "#000",
+          weight: 1,
+          opacity: 1,
+          fillOpacity: 0.8
+        }).addTo(waypointsLayer)
+
+        // 添加弹出信息，显示航点序号和高度
+        circleMarker.bindPopup(`
+      <div>
+        <strong>航点 ${wp.key}</strong><br>
+        纬度: ${wp.lat.toFixed(6)}<br>
+        经度: ${wp.lon.toFixed(6)}<br>
+        高度: ${wp.alt.toFixed(2)} m
+      </div>
+    `)
+      })
+      console.log(waypoints, "waypoints")
+      const waypoints1 = waypoints.map((wp) => [wp.lat, wp.lon]) as LatLngExpression[]
+      // 创建并添加航线到地图
+      var polyline = L.polyline(waypoints1, { color: "red" }).addTo(LMap!)
+
+      // 缩放地图以适应航线
+      LMap!.fitBounds(polyline.getBounds())
       finishWaypointLoading(`✅ 完成！共 ${expectedTotal.value} 个航点`, false)
     }
   }
@@ -526,267 +557,257 @@ onBeforeUnmount(() => {
     clearTimeout(idleTimer)
   }
 })
+const telemetryType = {
+  MANUAL: "手动",
+  HOLD: "停船",
+  AUTO: "自动",
+  GUIDE: "指点",
+  RTL: "返航",
+  LOITER: "留待"
+} as const
 </script>
 
 <template>
-  <div class="min-h-screen px-6 py-4 flex flex-col">
-    <div class="flex justify-between">
-      <div class="flex items-center gap-3">
-        <div class="w-8 h-8 rounded" style="background: #111; display: flex; align-items: center; justify-content: center">
-          <span class="text-white text-sm">✈</span>
-        </div>
-        <span class="text-lg" style="font-family: Saans, ui-sans-serif; letter-spacing: -0.48px">MAVLink 遥测监控</span>
-      </div>
-      <div class="flex items-center gap-2" style="display: flex; align-items: center; gap: 8px">
-        <span
-          class="w-2 h-2 rounded-full"
-          :style="{
-            background: connectionStatus === 'online' ? '#0bdf50' : connectionStatus === 'connecting' ? '#ff5600' : '#7b7b78'
-          }"
-        ></span>
-        <span style="color: #626260; font-size: 14px">
-          {{ connectionStatus === "online" ? "已连接" : connectionStatus === "connecting" ? "连接中" : "未连接" }}
-        </span>
-      </div>
-    </div>
-
-    <!-- 主内容 -->
-    <div class="flex-1 flex gap-3">
-      <!-- 左侧数据区 - 紧凑布局 -->
-      <div class="">
-        <div class="grid gap-3" style="grid-template-columns: repeat(6, 1fr)">
-          <!-- 横滚 -->
-
-          <n-card size="small" title="横滚">
-            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">{{ telemetry.roll_deg ?? "--" }}°</div>
-          </n-card>
-          <!-- 俯仰 -->
-
-          <n-card size="small" title="俯仰">
-            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">
-              {{ telemetry.pitch_deg ?? "--" }}°
-            </div>
-          </n-card>
-
-          <!-- 偏航 -->
-          <n-card size="small" title="偏航">
-            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">{{ telemetry.yaw_deg ?? "--" }}°</div>
-          </n-card>
-
-          <!-- 航向 -->
-          <n-card size="small" title="航向">
-            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">
-              {{ telemetry.heading?.toFixed(0) ?? "--" }}°
-            </div>
-          </n-card>
-
-          <!-- 地速 -->
-          <n-card size="small" title="地速">
-            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">
-              {{ telemetry.groundspeed?.toFixed(1) ?? "--" }}
-            </div>
-          </n-card>
-
-          <!-- 相对高度 -->
-          <n-card size="small" title="高度">
-            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">
-              {{ telemetry.relative_alt ? (telemetry.relative_alt / 1000).toFixed(1) : "--" }}
-            </div>
-          </n-card>
-
-          <!-- 电池电压 -->
-          <n-card size="small" title="电池">
-            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">
-              {{ telemetry.voltage ? (telemetry.voltage / 1000).toFixed(1) : "--" }}
-            </div>
-          </n-card>
-
-          <!-- 电量 -->
-          <n-card size="small" title="电量">
-            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">
-              {{ telemetry.battery_remaining ?? "--" }}%
-            </div>
-          </n-card>
-
-          <!-- GPS状态 -->
-          <n-card size="small" title="🛰️ GPS 定位">
-            <div class="text-xl font-bold mb-1">{{ fixTypeText }}</div>
-            <div class="text-gray-500 text-sm">{{ telemetry.eph !== null ? (telemetry.eph / 100).toFixed(1) : "---" }} m</div>
-          </n-card>
-
-          <!-- 卫星数 -->
-          <n-card size="small" title="卫星">
-            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">
-              {{ telemetry.satellites ?? 0 }}
-            </div>
-          </n-card>
-
-          <!-- 锁定状态 -->
-          <n-card size="small" title="锁定">
-            <div
-              class="text-base font-semibold"
-              :style="{ color: telemetry.armed ? '#0bdf50' : '#fe4c02', fontFamily: 'Saans, ui-sans-serif' }"
-            >
-              {{ telemetry.armed ? "已解锁" : "已锁定" }}
-            </div>
-          </n-card>
-
-          <!-- 飞行模式 -->
-          <n-card size="small" title="模式">
-            <div class="text-base font-semibold" style="font-family: Saans, ui-sans-serif">{{ telemetry.mode }}</div>
-          </n-card>
-          <n-card size="small" title="位置坐标">
-            <div class="text-sm font-mono" style="font-family: ui-monospace">
-              {{ telemetry.lat ? (telemetry.lat / 1e7).toFixed(6) : "--" }},
-              {{ telemetry.lon ? (telemetry.lon / 1e7).toFixed(6) : "--" }}
-            </div>
-          </n-card>
+  <div class="bg-black-300 h-full w-full relative">
+    <div id="leaf_map" class="h-full w-full"></div>
+    <div class="w-125 px-2 py-3 flex flex-col absolute z-999 top-2 right-2 border contrast">
+      <div class="flex justify-between">
+        <div class="flex items-center gap-2" style="display: flex; align-items: center; gap: 8px">
+          <span
+            class="w-2 h-2 rounded-full"
+            :style="{
+              background: connectionStatus === 'online' ? '#0bdf50' : connectionStatus === 'connecting' ? '#ff5600' : '#7b7b78'
+            }"
+          ></span>
+          <span style="color: #626260; font-size: 14px">
+            {{ connectionStatus === "online" ? "已连接" : connectionStatus === "connecting" ? "连接中" : "未连接" }}
+          </span>
         </div>
       </div>
 
-      <!-- 右侧控制区 - 加宽 -->
+      <!-- 主内容 -->
       <div class="flex-1">
-        <!-- 解锁/加锁 -->
-        <div class="p-4 rounded-lg" style="background: #ffffff; border: 1px solid #dedbd6">
-          <div class="text-xs uppercase mb-3" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">
-            飞控控制
-          </div>
-          <div class="flex gap-2">
-            <button
-              @click="arm"
-              class="flex-1 py-2 rounded text-white text-sm font-semibold transition-transform hover:scale-105"
-              style="background: #111111; border-radius: 4px"
-            >
-              解锁
-            </button>
-            <button
-              @click="disarm"
-              class="flex-1 py-2 rounded text-sm font-semibold transition-transform hover:scale-105"
-              style="background: #ffffff; color: #111111; border: 1px solid #111111; border-radius: 4px"
-            >
-              加锁
-            </button>
-          </div>
-        </div>
-
-        <!-- 模式切换 -->
-        <div class="p-4 rounded-lg" style="background: #ffffff; border: 1px solid #dedbd6">
-          <div class="text-xs uppercase mb-3" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">
-            飞行模式
-          </div>
-          <div class="flex gap-2">
-            <select
-              v-model="selectedMode"
-              class="flex-1 px-2 py-1.5 rounded text-sm"
-              style="border: 1px solid #dedbd6; border-radius: 4px"
-            >
-              <option v-for="m in flightModeOptions" :key="m.value" :value="m.value">{{ m.label }}</option>
-            </select>
-            <button
-              @click="setMode(selectedMode)"
-              class="px-4 py-1.5 rounded text-white text-sm font-semibold transition-transform hover:scale-105"
-              style="background: #ff5600; border-radius: 4px"
-            >
-              切换
-            </button>
-          </div>
-        </div>
-
-        <!-- 航线读取 -->
-        <div class="p-4 rounded-lg" style="background: #ffffff; border: 1px solid #dedbd6">
-          <div class="text-xs uppercase mb-3" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">
-            航线读取
-          </div>
-          <div class="flex gap-2 mb-3">
-            <button
-              @click="startFetchWaypoints"
-              :disabled="isLoadingWaypoints"
-              class="flex-1 py-2 rounded text-white text-sm font-semibold transition-transform hover:scale-105 disabled:opacity-50"
-              style="background: #111111; border-radius: 4px"
-            >
-              {{ isLoadingWaypoints ? "读取中" : "读取航线" }}
-            </button>
-            <button
-              @click="stopFetchWaypoints"
-              :disabled="!isLoadingWaypoints"
-              class="flex-1 py-2 rounded text-sm transition-transform hover:scale-105 disabled:opacity-50"
-              style="background: #faf9f6; border: 1px solid #dedbd6; border-radius: 4px"
-            >
-              停止
-            </button>
-          </div>
-          <!-- 实时速度显示 -->
-          <div class="grid grid-cols-3 gap-2 mb-2">
-            <div class="text-center p-2 rounded" style="background: #faf9f6">
-              <div class="text-xs uppercase" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">已读取</div>
-              <div class="text-sm font-semibold" style="font-family: Saans, ui-sans-serif">{{ waypointStats.received }}</div>
+        <!-- 左侧数据区 - 紧凑布局 -->
+        <div>
+          <div class="grid gap-3 text-base text-white font-semibold" style="grid-template-columns: repeat(4, 1fr)">
+            <!-- 横滚 -->
+            <div class="border border-gray-400 flex gap-2 h-14 items-center px-3">
+              <span>横滚</span>
+              <div class="ml-auto text-sm" style="font-family: Saans, ui-sans-serif">{{ telemetry.roll_deg ?? "--" }}°</div>
             </div>
-            <div class="text-center p-2 rounded" style="background: #faf9f6">
-              <div class="text-xs uppercase" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">耗时</div>
-              <div class="text-sm font-semibold" style="font-family: Saans, ui-sans-serif">
-                {{ waypointStats.elapsed.toFixed(1) }}s
+
+            <!-- 俯仰 -->
+            <div class="border border-gray-300 flex gap-2 h-14 items-center px-3">
+              <span>俯仰</span>
+              <div class="ml-auto text-sm" style="font-family: Saans, ui-sans-serif">{{ telemetry.pitch_deg ?? "--" }}°</div>
+            </div>
+
+            <!-- 偏航 -->
+            <div class="border border-gray-300 flex gap-2 h-14 items-center px-3">
+              <span>偏航</span>
+              <div class="ml-auto text-sm" style="font-family: Saans, ui-sans-serif">{{ telemetry.yaw_deg ?? "--" }}°</div>
+            </div>
+
+            <!-- 航向 -->
+            <div class="border border-gray-300 flex gap-2 h-14 items-center px-3">
+              <span>航向</span>
+              <div class="ml-auto text-sm" style="font-family: Saans, ui-sans-serif">
+                {{ telemetry.heading?.toFixed(0) ?? "--" }}°
               </div>
             </div>
-            <div class="text-center p-2 rounded" style="background: #faf9f6">
-              <div class="text-xs uppercase" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">速度</div>
-              <div class="text-sm font-semibold" style="font-family: Saans, ui-sans-serif; color: #ff5600">
-                {{ waypointStats.rate.toFixed(1) }}/s
+
+            <!-- 地速 -->
+            <div class="border border-gray-300 flex gap-2 h-14 items-center px-3">
+              <span>地速</span>
+              <div class="ml-auto text-sm" style="font-family: Saans, ui-sans-serif">
+                {{ telemetry.groundspeed?.toFixed(1) ?? "--" }}
+              </div>
+            </div>
+
+            <!-- 相对高度 -->
+            <div class="border border-gray-300 flex gap-2 h-14 items-center px-3">
+              <span>高度</span>
+              <div class="ml-auto text-sm" style="font-family: Saans, ui-sans-serif">
+                {{ telemetry.relative_alt ? (telemetry.relative_alt / 1000).toFixed(1) : "--" }}
+              </div>
+            </div>
+
+            <!-- 电池电压 -->
+            <div class="border border-gray-300 flex gap-2 h-14 items-center px-3">
+              <span>电池</span>
+              <div class="ml-auto text-sm" style="font-family: Saans, ui-sans-serif">
+                {{ telemetry.voltage ? (telemetry.voltage / 1000).toFixed(1) : "--" }}
+              </div>
+            </div>
+
+            <!-- 电量 -->
+            <div class="border border-gray-300 flex gap-2 h-14 items-center px-3">
+              <span>电量</span>
+              <div class="ml-auto text-sm" style="font-family: Saans, ui-sans-serif">
+                {{ telemetry.battery_remaining ?? "--" }}%
+              </div>
+            </div>
+            <div class="border border-gray-300 flex flex-col justify-center h-14 px-3">
+              <div class="flex items-center gap-2">
+                <span>GPS定位</span>
+                <div class="ml-auto text-sm font-bold" style="font-family: Saans, ui-sans-serif">{{ fixTypeText }}</div>
+              </div>
+            </div>
+
+            <!-- GPS状态 -->
+            <div class="border border-gray-300 flex flex-col justify-center h-14 px-3">
+              <div class="text-sm text-gray-500 mt-1">
+                {{ telemetry.eph !== null ? (telemetry.eph / 100).toFixed(1) : "---" }} m
+              </div>
+            </div>
+
+            <!-- 卫星数 -->
+            <div class="border border-gray-300 flex gap-2 h-14 items-center px-3">
+              <span>卫星</span>
+              <div class="ml-auto text-sm" style="font-family: Saans, ui-sans-serif">{{ telemetry.satellites ?? 0 }}</div>
+            </div>
+
+            <!-- 锁定状态 -->
+            <div class="border border-gray-300 flex gap-2 h-14 items-center px-3">
+              <span>锁定</span>
+              <div
+                class="ml-auto text-sm"
+                :style="{ color: telemetry.armed ? '#0bdf50' : '#fe4c02', fontFamily: 'Saans, ui-sans-serif' }"
+              >
+                {{ telemetry.armed ? "已解锁" : "已锁定" }}
+              </div>
+            </div>
+
+            <!-- 飞行模式 -->
+            <div class="border border-gray-300 flex gap-2 h-14 items-center px-3">
+              <span>模式</span>
+              <div class="ml-auto text-sm" style="font-family: Saans, ui-sans-serif">{{ telemetryType[telemetry.mode] }}</div>
+            </div>
+
+            <!-- 位置坐标 -->
+            <div class="border border-gray-300 flex flex-col justify-center h-14 px-3">
+              <div class="text-sm font-mono" style="font-family: ui-monospace">
+                {{ telemetry.lat ? (telemetry.lat / 1e7).toFixed(6) : "--" }},
+                {{ telemetry.lon ? (telemetry.lon / 1e7).toFixed(6) : "--" }}
               </div>
             </div>
           </div>
-          <div v-if="waypointStats.status" style="color: #7b7b78; font-size: 12px">{{ waypointStats.status }}</div>
         </div>
 
-        <!-- 航点列表 -->
-        <div class="p-4 rounded-lg" style="background: #ffffff; border: 1px solid #dedbd6">
-          <div class="text-xs uppercase mb-3" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">
-            航点列表
+        <!-- 右侧控制区 - 加宽 -->
+        <div class="flex-1 py-2 px-1">
+          <!-- 解锁/加锁 -->
+          <div class="flex items-center gap-2">
+            <div class="text-xs uppercase mb-3" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">
+              飞控控制
+            </div>
+            <div class="flex gap-2">
+              <n-button @click="arm" type="primary"> 解锁 </n-button>
+              <n-button @click="disarm" type="error"> 加锁 </n-button>
+            </div>
+            <div class="flex items-center justify-between mb-4 border-red-400">
+              <div class="text-xs font-semibold uppercase tracking-wider" style="color: #6b7280; font-family: ui-monospace">
+                飞行模式
+              </div>
+              <n-select v-model:value="selectedMode" :options="flightModeOptions" />
+              <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+                <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                </svg>
+              </div>
+              <n-button @click="setMode(selectedMode)" type="primary"> 切换模式 </n-button>
+            </div>
           </div>
-          <div class="max-h-96 overflow-y-auto rounded" style="border: 1px solid #dedbd6">
-            <table class="w-full text-xs">
-              <thead style="background: #faf9f6">
-                <tr>
-                  <th
-                    class="px-2 py-2 text-left uppercase"
-                    style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace"
-                  >
-                    #
-                  </th>
-                  <th
-                    class="px-2 py-2 text-left uppercase"
-                    style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace"
-                  >
-                    纬度
-                  </th>
-                  <th
-                    class="px-2 py-2 text-left uppercase"
-                    style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace"
-                  >
-                    经度
-                  </th>
-                  <th
-                    class="px-2 py-2 text-left uppercase"
-                    style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace"
-                  >
-                    高度
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="wp in waypointsData" :key="wp.key" style="border-top: 1px solid #dedbd6">
-                  <td class="px-2 py-2" style="color: #111111">{{ wp.seq }}</td>
-                  <td class="px-2 py-2 font-mono" style="color: #626260">{{ wp.lat }}</td>
-                  <td class="px-2 py-2 font-mono" style="color: #626260">{{ wp.lon }}</td>
-                  <td class="px-2 py-2" style="color: #626260">{{ wp.alt }}m</td>
-                </tr>
-                <tr v-if="waypointsData.length === 0">
-                  <td colspan="4" class="px-2 py-4 text-center" style="color: #7b7b78">暂无数据</td>
-                </tr>
-              </tbody>
-            </table>
+
+          <div class="">
+            <div class="text-xs uppercase mb-3" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">
+              航线读取
+            </div>
+            <div class="flex gap-2 mb-3">
+              <n-button @click="startFetchWaypoints" type="primary" :disabled="isLoadingWaypoints">
+                {{ isLoadingWaypoints ? "读取中" : "读取航线" }}
+              </n-button>
+              <n-button @click="stopFetchWaypoints" type="primary" :disabled="!isLoadingWaypoints"> 停止 </n-button>
+            </div>
+            <div class="grid grid-cols-3 gap-2 mb-2 border border-gray-50 text-white">
+              <div class="text-center p-2 rounded">
+                <div class="text-xs uppercase" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">
+                  已读取
+                </div>
+                <div class="text-sm font-semibold">{{ waypointStats.received }}</div>
+              </div>
+              <div class="text-center p-2 rounded">
+                <div class="text-xs uppercase" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">耗时</div>
+                <div class="text-sm font-semibold" style="font-family: Saans, ui-sans-serif">
+                  {{ waypointStats.elapsed.toFixed(1) }}s
+                </div>
+              </div>
+              <div class="text-center p-2 rounded">
+                <div class="text-xs uppercase" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">速度</div>
+                <div class="text-sm font-semibold" style="font-family: Saans, ui-sans-serif; color: #ff5600">
+                  {{ waypointStats.rate.toFixed(1) }}/s
+                </div>
+              </div>
+            </div>
+            <div v-if="waypointStats.status" style="color: #7b7b78; font-size: 12px">{{ waypointStats.status }}</div>
+          </div>
+
+          <div class="rounded-lg">
+            <div class="text-xs uppercase mb-3" style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace">
+              航点列表
+            </div>
+            <div class="max-h-84 overflow-y-auto rounded" style="border: 1px solid #dedbd6">
+              <table class="w-full text-xs">
+                <thead style="background: #faf9f6">
+                  <tr>
+                    <th
+                      class="px-2 py-2 text-left uppercase"
+                      style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace"
+                    >
+                      #
+                    </th>
+                    <th
+                      class="px-2 py-2 text-left uppercase"
+                      style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace"
+                    >
+                      纬度
+                    </th>
+                    <th
+                      class="px-2 py-2 text-left uppercase"
+                      style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace"
+                    >
+                      经度
+                    </th>
+                    <th
+                      class="px-2 py-2 text-left uppercase"
+                      style="color: #7b7b78; letter-spacing: 0.6px; font-family: ui-monospace"
+                    >
+                      高度
+                    </th>
+                  </tr>
+                </thead>
+                <tbody style="background: #faf9f6">
+                  <tr v-for="wp in waypointsData" :key="wp.key" style="border-top: 1px solid #dedbd6">
+                    <td class="px-2 py-2" style="color: #7b7b78">{{ wp.seq }}</td>
+                    <td class="px-2 py-2 font-mono" style="color: #7b7b78">{{ wp.lat }}</td>
+                    <td class="px-2 py-2 font-mono" style="color: #7b7b78">{{ wp.lon }}</td>
+                    <td class="px-2 py-2" style="color: #7b7b78">{{ wp.alt }}m</td>
+                  </tr>
+                  <tr v-if="waypointsData.length === 0">
+                    <td colspan="4" class="px-2 py-4 text-center" style="color: #7b7b78">暂无数据</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>
     </div>
   </div>
 </template>
+<style>
+.contrast {
+  background: rgba(13, 22, 35, 0.9);
+  backdrop-filter: blur(12px);
+}
+</style>
