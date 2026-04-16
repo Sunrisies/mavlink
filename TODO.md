@@ -142,6 +142,7 @@
 - [ ] 优化编译选项（`lto`、`strip`、`opt-level="z"`）
 - [ ] 编写 systemd 服务文件或启动脚本
 - [ ] 生成最小化 Docker 镜像（可选）
+- [X] 参考 [CROSS_COMPILE.md](./CROSS_COMPILE.md) 了解使用 cargo-zigbuild 进行交叉编译的详细指南
 
 ---
 
