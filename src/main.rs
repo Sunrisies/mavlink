@@ -492,7 +492,7 @@ async fn send_mqtt_data(
     Ok(())
 }
 fn setup_mqtt() -> Result<(AsyncClient, EventLoop)> {
-    let mqtt_host = String::from("101.200.223.8");
+    let mqtt_host = String::from("mqtt.example.com");
     let mqtt_port = 1883;
     // 设置 MQTT 连接选项
     // 生成随机数作为客户端 ID 的一部分
