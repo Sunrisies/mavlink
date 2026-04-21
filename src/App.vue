@@ -506,6 +506,139 @@ function stopFetchWaypoints() {
   finishWaypointLoading(`⏹️ 已手动停止，共接收 ${waypointsMap.value.size} 个航点`, false)
 }
 
+// 存储地图点击事件处理函数
+let mapClickHandler: ((e: any) => void) | null = null
+
+// 存储航线图层
+let waypointsLayer: L.LayerGroup | null = null
+let polylineLayer: L.Polyline | null = null
+
+// 添加航点
+const addWaypoints = () => {
+  if (!LMap) {
+    console.warn("地图未初始化")
+    return
+  }
+  
+  // 如果已经在添加模式，则取消添加模式
+  if (mapClickHandler) {
+    LMap.off("click", mapClickHandler)
+    mapClickHandler = null
+    waypointStats.status = "已退出添加航点模式"
+    return
+  }
+  
+  // 创建图层组（如果不存在）
+  if (!waypointsLayer) {
+    waypointsLayer = L.layerGroup().addTo(LMap)
+  }
+  
+  // 进入添加航点模式
+  waypointStats.status = "点击地图添加航点，再次点击“添加航线”按钮退出"
+  
+  // 添加地图点击事件
+  mapClickHandler = (e: any) => {
+    const { lat, lng } = e.latlng
+    const seq = waypointsMap.value.size + 1
+    const defaultAlt = 100 // 默认高度
+    
+    // 添加航点到Map
+    waypointsMap.value.set(seq, {
+      seq: seq,
+      lat: lat,
+      lon: lng,
+      alt: defaultAlt
+    })
+    
+    // 在地图上添加航点标记
+    const circleMarker = L.circleMarker([lat, lng], {
+      radius: 5,
+      fillColor: "#ff7800",
+      color: "#000",
+      weight: 1,
+      opacity: 1,
+      fillOpacity: 0.8
+    }).addTo(waypointsLayer!)
+    
+    // 添加弹出信息
+    circleMarker.bindPopup(`
+      <div>
+        <strong>航点 ${seq}</strong><br>
+        纬度: ${lat.toFixed(6)}<br>
+        经度: ${lng.toFixed(6)}<br>
+        高度: ${defaultAlt.toFixed(2)} m
+      </div>
+    `)
+    
+    // 更新航线
+    updatePolyline()
+    
+    // 更新状态
+    waypointStats.status = `已添加第 ${seq} 个航点，继续点击地图添加更多航点，或点击“添加航线”按钮退出`
+    updateWaypointStats()
+  }
+  
+  // 绑定点击事件
+  LMap.on("click", mapClickHandler)
+}
+
+// 更新航线
+const updatePolyline = () => {
+  if (!LMap || !waypointsLayer) return
+  
+  // 移除旧的航线
+  if (polylineLayer) {
+    waypointsLayer.removeLayer(polylineLayer)
+  }
+  
+  // 获取所有航点并按序号排序
+  const waypoints = Array.from(waypointsMap.value.values())
+    .sort((a, b) => a.seq - b.seq)
+  
+  // 如果有足够的航点，绘制航线
+  if (waypoints.length >= 2) {
+    const waypointsCoords = waypoints.map(wp => [wp.lat, wp.lon]) as LatLngExpression[]
+    polylineLayer = L.polyline(waypointsCoords, { color: "red" }).addTo(waypointsLayer)
+  }
+}
+
+// 发送航点到飞控
+const sendWaypoints = () => {
+  if (waypointsMap.value.size === 0) {
+    alert("没有航点可发送")
+    return
+  }
+  
+  // 将航点转换为数组格式
+  const waypoints = Array.from(waypointsMap.value.values())
+    .sort((a, b) => a.seq - b.seq)
+    .map(wp => ({
+      seq: wp.seq,
+      lat: wp.lat,
+      lon: wp.lon,
+      alt: wp.alt
+    }))
+  
+  // 添加seq为0的起始点
+  const waypointData = [
+    {
+      seq: 0,
+      lat: 0,
+      lon: 0,
+      alt: 0
+    },
+    ...waypoints
+  ]
+  
+  // 发送航点数据
+  sendCommand({
+    type: "set_list",
+    data: waypointData
+  })
+  
+  waypointStats.status = `✅ 已发送 ${waypoints.length} 个航点到飞控`
+}
+
 // ========== MQTT 连接 ==========
 let client: MqttClient | null = null
 function connectMQTT() {
@@ -736,6 +869,8 @@ const telemetryType = {
                 {{ isLoadingWaypoints ? "读取中" : "读取航线" }}
               </n-button>
               <n-button @click="stopFetchWaypoints" type="primary" :disabled="!isLoadingWaypoints"> 停止 </n-button>
+              <n-button @click="addWaypoints" type="primary"> 添加航线 </n-button>
+              <n-button @click="sendWaypoints" type="success"> 发送 </n-button>
             </div>
             <div class="grid grid-cols-3 gap-2 mb-2 border border-gray-50 text-white">
               <div class="text-center p-2 rounded">
