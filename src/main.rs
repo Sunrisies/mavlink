@@ -1,7 +1,8 @@
 mod logger;
-
+mod web_server;
 use anyhow::Result;
 use logger::init_logger;
+use actix_web::{App, HttpServer};
 use mavlink::{
     MavConnection, MavHeader, Message,
     ardupilotmega::{MavAutopilot, MavMessage, MavModeFlag, MavState, MavType},
@@ -11,7 +12,9 @@ use rumqttc::v5::{
     mqttbytes::{QoS, v5::Packet},
 };
 use serde::Deserialize;
+use serde_json::Value;
 use serde_json::json;
+use std::env;
 use std::{
     sync::Arc,
     thread,
@@ -39,13 +42,45 @@ enum Payload {
     #[serde(rename = "set_list")]
     SetList { data: Vec<Waypoint> },
 }
-
+const GIT_COMMITS_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/git_commits.json"));
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 加载 .env 文件
+    dotenv::dotenv().ok();
     init_logger();
-    let conn_str = String::from("udpin:127.0.0.1:23445");
+    let v: Value = serde_json::from_str(GIT_COMMITS_JSON).unwrap();
+    let version = v["version"].as_str().unwrap();
+    let count = v["count"].as_u64().unwrap();
+    println!("当前程序版本: {}", version);
+    println!("共包含 {} 条 commit 记录", count);
+    // 可打印第一条 commit 验证
+    if let Some(first) = v["commits"].as_array().and_then(|arr| arr.first()) {
+        println!("最早 commit: {}", first["hash"]);
+    }
+
+    // 从环境变量读取配置
+    let conn_str =
+        env::var("MAVLINK_CONN_STR").unwrap_or_else(|_| "udpin:127.0.0.1:23445".to_string());
     let conn_str_clone = conn_str.clone();
-    let topic = String::from("mavlink/incoming");
+    
+    // 从环境变量读取 Web 服务器配置
+    let web_host = env::var("WEB_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let web_port = env::var("WEB_PORT")
+        .unwrap_or_else(|_| "8080".to_string())
+        .parse::<u16>()
+        .unwrap_or(8080);
+    
+    // 启动 Web 服务器
+    let web_server = HttpServer::new(|| {
+        App::new()
+            .configure(web_server::config)
+    })
+    .bind((web_host.as_str(), web_port))?;
+    
+    log::info!("Web 服务器已启动: http://{}:{}", web_host, web_port);
+    let web_server_handle = web_server.run();
+    let web_server_handle = tokio::spawn(web_server_handle);
+    let topic = env::var("MQTT_TOPIC_INCOMING").unwrap_or_else(|_| "mavlink/incoming".to_string());
     let (client, mut eventloop) = setup_mqtt()?;
     // 2. 创建消息通道
     // 从 MAVLink 线程到主循环
@@ -68,9 +103,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let client_clone = client.clone();
-    client_clone.subscribe("send", QoS::AtMostOnce).await?;
+    let topic_send = env::var("MQTT_TOPIC_SEND").unwrap_or_else(|_| "send".to_string());
+    client_clone.subscribe(&topic_send, QoS::AtMostOnce).await?;
 
     let topic_clone = topic.clone();
+    let topic_get_list = env::var("MQTT_TOPIC_GET_LIST").unwrap_or_else(|_| "get_list".to_string());
+    let topic_set_list = env::var("MQTT_TOPIC_SET_LIST").unwrap_or_else(|_| "set_list".to_string());
+
     let publish_task = task::spawn(async move {
         let mut waypoint_received: Vec<Waypoint> = Vec::new();
         let mut expected_total = 0;
@@ -88,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     });
                     let _ = client_clone
                         .publish(
-                            "get_list",
+                            &topic_get_list,
                             QoS::AtLeastOnce,
                             false,
                             serde_json::to_vec(&start_json).unwrap(),
@@ -112,7 +151,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     });
                     if let Err(e) = client_clone
                         .publish(
-                            "get_list",
+                            &topic_get_list,
                             QoS::AtLeastOnce,
                             false,
                             serde_json::to_vec(&wp_json).unwrap(),
@@ -131,7 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         });
                         let _ = client_clone
                             .publish(
-                                "get_list",
+                                &topic_get_list,
                                 QoS::AtLeastOnce,
                                 false,
                                 serde_json::to_vec(&complete_json).unwrap(),
@@ -149,7 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let wp = WaypointWrite { seq: msg.seq };
                     if let Err(e) = client_clone
                         .publish(
-                            "set_list",
+                            &topic_set_list,
                             QoS::AtLeastOnce,
                             false,
                             serde_json::to_vec(&wp).unwrap(),
@@ -167,7 +206,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         });
                         let _ = client_clone
                             .publish(
-                                "set_list",
+                                &topic_set_list,
                                 QoS::AtLeastOnce,
                                 false,
                                 serde_json::to_vec(&complete_json).unwrap(),
@@ -197,7 +236,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match event {
                     Ok(Event::Incoming(Packet::Publish(publish))) => {
                         // 1. 检查 topic
-                        if publish.topic == "send" {
+                        if publish.topic == topic_send {
                             // 2. 尝试解析 payload 为 JSON
                             match serde_json::from_slice::<Payload>(&publish.payload) {
                                 Ok(payload) => {
@@ -492,8 +531,22 @@ async fn send_mqtt_data(
     Ok(())
 }
 fn setup_mqtt() -> Result<(AsyncClient, EventLoop)> {
-    let mqtt_host = String::from("mqtt.example.com");
-    let mqtt_port = 1883;
+    let mqtt_host = env::var("MQTT_HOST").unwrap_or_else(|_| "mqtt.example.com".to_string());
+    let mqtt_port = env::var("MQTT_PORT")
+        .unwrap_or_else(|_| "1883".to_string())
+        .parse::<u16>()
+        .unwrap_or(1883);
+    let keep_alive = env::var("MQTT_KEEP_ALIVE")
+        .unwrap_or_else(|_| "5".to_string())
+        .parse::<u64>()
+        .unwrap_or(5);
+    let max_packet_size: u32 = env::var("MQTT_MAX_PACKET_SIZE")
+        .unwrap_or_else(|_| "10485760".to_string())
+        .parse::<usize>()
+        .unwrap_or(10 * 1024 * 1024)
+        .try_into()
+        .unwrap();
+
     // 设置 MQTT 连接选项
     // 生成随机数作为客户端 ID 的一部分
     let client_id = format!(
@@ -504,8 +557,8 @@ fn setup_mqtt() -> Result<(AsyncClient, EventLoop)> {
             .as_millis()
     );
     let mut mqtt_opts = MqttOptions::new(client_id, mqtt_host, mqtt_port);
-    mqtt_opts.set_keep_alive(Duration::from_secs(5));
-    mqtt_opts.set_max_packet_size(Some(10 * 1024 * 1024));
+    mqtt_opts.set_keep_alive(Duration::from_secs(keep_alive));
+    mqtt_opts.set_max_packet_size(Some(max_packet_size));
     // 创建异步 MQTT 客户端和事件循环
     let (client, eventloop) = AsyncClient::new(mqtt_opts, 10);
     Ok((client, eventloop))

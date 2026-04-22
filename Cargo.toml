@@ -1,7 +1,8 @@
 [package]
 name = "my-rust-server"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
+build = "build.rs"
 
 [dependencies]
 actix-web = "4"
@@ -25,3 +26,10 @@ log4rs = "1.4.0"
 nu-ansi-term = "0.50.3"
 rand = "0.10.0"
 rumqttc = "0.25.1"
+dotenv = "0.15"
+
+[build-dependencies]
+serde_json = "1.0"    # 构建脚本也需要
+toml_edit = "0.25.11"
+semver = "1.0.28"
+chrono = "0.4"
