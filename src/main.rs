@@ -1,8 +1,8 @@
 mod logger;
 mod web_server;
+use actix_web::{App, HttpServer};
 use anyhow::Result;
 use logger::init_logger;
-use actix_web::{App, HttpServer};
 use mavlink::{
     MavConnection, MavHeader, Message,
     ardupilotmega::{MavAutopilot, MavMessage, MavModeFlag, MavState, MavType},
@@ -51,32 +51,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let v: Value = serde_json::from_str(GIT_COMMITS_JSON).unwrap();
     let version = v["version"].as_str().unwrap();
     let count = v["count"].as_u64().unwrap();
-    println!("当前程序版本: {}", version);
-    println!("共包含 {} 条 commit 记录", count);
+    log::debug!("当前程序版本: {}", version);
+    log::debug!("共包含 {} 条 commit 记录", count);
     // 可打印第一条 commit 验证
     if let Some(first) = v["commits"].as_array().and_then(|arr| arr.first()) {
-        println!("最早 commit: {}", first["hash"]);
+        log::debug!("最早 commit: {}", first["hash"]);
     }
 
     // 从环境变量读取配置
     let conn_str =
         env::var("MAVLINK_CONN_STR").unwrap_or_else(|_| "udpin:127.0.0.1:23445".to_string());
     let conn_str_clone = conn_str.clone();
-    
+
     // 从环境变量读取 Web 服务器配置
     let web_host = env::var("WEB_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let web_port = env::var("WEB_PORT")
         .unwrap_or_else(|_| "8080".to_string())
         .parse::<u16>()
         .unwrap_or(8080);
-    
+
     // 启动 Web 服务器
-    let web_server = HttpServer::new(|| {
-        App::new()
-            .configure(web_server::config)
-    })
-    .bind((web_host.as_str(), web_port))?;
-    
+    let web_server = HttpServer::new(|| App::new().configure(web_server::config))
+        .bind((web_host.as_str(), web_port))?;
+
     log::info!("Web 服务器已启动: http://{}:{}", web_host, web_port);
     let web_server_handle = web_server.run();
     let web_server_handle = tokio::spawn(web_server_handle);

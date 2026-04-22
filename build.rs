@@ -1,5 +1,4 @@
 use chrono::Local;
-use chrono::Utc;
 use semver::Version;
 use serde_json::json;
 use std::env;
