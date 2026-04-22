@@ -51,11 +51,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let v: Value = serde_json::from_str(GIT_COMMITS_JSON).unwrap();
     let version = v["version"].as_str().unwrap();
     let count = v["count"].as_u64().unwrap();
-    log::debug!("当前程序版本: {}", version);
-    log::debug!("共包含 {} 条 commit 记录", count);
+    log::info!("当前程序版本: {}", version);
+    log::info!("共包含 {} 条 commit 记录", count);
     // 可打印第一条 commit 验证
     if let Some(first) = v["commits"].as_array().and_then(|arr| arr.first()) {
-        log::debug!("最早 commit: {}", first["hash"]);
+        log::info!("最早 commit: {}", first["hash"]);
     }
 
     // 从环境变量读取配置
@@ -493,7 +493,6 @@ async fn send_mqtt_data(
             })
         }
         _ => {
-            log::debug!("msg:{msg:?}");
             // 对于其他消息类型，使用通用转换
             let data_value = serde_json::to_value(msg)?;
             json!({
@@ -523,7 +522,7 @@ async fn send_mqtt_data(
     {
         log::error!("MQTT 发布失败: {}", e);
     } else {
-        log::debug!("已发布消息: {}", msg.message_name());
+        log::info!("已发布消息: {}", msg.message_name());
     }
     Ok(())
 }
