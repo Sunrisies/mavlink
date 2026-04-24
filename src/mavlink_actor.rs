@@ -78,20 +78,20 @@ impl MavlinkActor {
                     match msg {
                      MavlinkActorMessage::MavlinkMessage((header, msg)) => {
                             // 处理 MAVLink 消息
-                            self.handle_mavlink_message(header, msg).await?;
+                            self.handle_mavlink_message(header, msg)?;
                         }
                         MavlinkActorMessage::RequestWaypointList => {
                             // 处理航点列表请求
-                            self.handle_request_waypoint_list().await?;
+                            self.handle_request_waypoint_list()?;
                         }
                         MavlinkActorMessage::ArmDisarm { arm } => {
-                            self.handle_arm_disarm(arm).await?;
+                            self.handle_arm_disarm(arm)?;
                         }
                         MavlinkActorMessage::SetMode { mode } => {
-                            self.handle_set_mode(mode).await?;
+                            self.handle_set_mode(mode)?;
                         }
                         MavlinkActorMessage::SetWaypointList { waypoints } => {
-                            self.handle_set_waypoint_list(waypoints).await?;
+                            self.handle_set_waypoint_list(waypoints)?;
                         }
                     }
                 }
@@ -99,7 +99,7 @@ impl MavlinkActor {
         }
     }
 
-    async fn handle_mavlink_message(&mut self, _header: MavHeader, msg: MavMessage) -> Result<()> {
+    fn handle_mavlink_message(&mut self, _header: MavHeader, msg: MavMessage) -> Result<()> {
         // 根据消息类型处理状态转换
         match msg {
             MavMessage::MISSION_COUNT(cnt) => {
@@ -226,7 +226,7 @@ impl MavlinkActor {
         Ok(())
     }
 
-    async fn handle_set_waypoint_list(&mut self, waypoints: Vec<Waypoint>) -> Result<()> {
+    fn handle_set_waypoint_list(&mut self, waypoints: Vec<Waypoint>) -> Result<()> {
         log::info!("收到设置航点列表请求，共 {} 个航点", waypoints.len());
         // 清除现有航点
         let clear_msg =
@@ -261,7 +261,7 @@ impl MavlinkActor {
         Ok(())
     }
 
-    async fn handle_request_waypoint_list(&mut self) -> Result<()> {
+    fn handle_request_waypoint_list(&mut self) -> Result<()> {
         log::info!("收到航点列表请求命令");
         let req = MavMessage::MISSION_REQUEST_LIST(MISSION_REQUEST_LIST_DATA {
             target_system: 1,
@@ -275,7 +275,7 @@ impl MavlinkActor {
         Ok(())
     }
 
-    async fn handle_arm_disarm(&mut self, arm: bool) -> Result<()> {
+    fn handle_arm_disarm(&mut self, arm: bool) -> Result<()> {
         log::info!("收到解锁/上锁命令: {}", arm);
         let msg = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
             target_system: 1,                      // 动态获取或配置
@@ -295,7 +295,7 @@ impl MavlinkActor {
         }
         Ok(())
     }
-    async fn handle_set_mode(&mut self, mode: String) -> Result<()> {
+    fn handle_set_mode(&mut self, mode: String) -> Result<()> {
         log::info!("收到模式切换命令: {}", mode);
         let mode_value = match mode.as_str() {
             "MANUAL" => RoverMode::ROVER_MODE_MANUAL as u16,

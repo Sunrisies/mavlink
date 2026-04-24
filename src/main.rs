@@ -360,12 +360,12 @@ fn mavlink_receiver_thread(
                 if let Err(e) =
                     actor_tx.blocking_send(MavlinkActorMessage::MavlinkMessage((header, msg)))
                 {
-                    log::error!("发送给 Actor 失败: {}", e);
+                    log::error!("发送给 Actor 失败: {e}");
                     break;
                 }
             }
             Err(e) => {
-                log::error!("接收 MAVLink 消息失败: {:?}", e);
+                log::error!("接收 MAVLink 消息失败: {e:?}");
                 // 短暂休眠后继续，避免疯狂重试
                 thread::sleep(Duration::from_millis(100));
             }
@@ -378,7 +378,7 @@ fn start_mavlink_thread(
     conn_str: &String,
 ) -> Arc<Box<dyn MavConnection<mavlink::ardupilotmega::MavMessage> + Send + Sync>> {
     let conn = mavlink::connect::<MavMessage>(&conn_str).expect("连接失败");
-    log::info!("✅ 已连接到飞控: {}", conn_str);
+    log::info!("✅ 已连接到飞控: {conn_str}");
     // conn
     let vehicle = Arc::new(conn);
     vehicle
@@ -531,7 +531,7 @@ async fn send_mqtt_data(
     };
     // log::info!("-----------收到 MAVLink 消息: {payload:?},数据");
     let payload_str = serde_json::to_string(&payload).unwrap_or_else(|e| {
-        log::error!("序列化 JSON 失败: {}", e);
+        log::error!("序列化 JSON 失败: {e}");
         "{}".to_string()
     });
     if let Err(e) = client
@@ -543,7 +543,7 @@ async fn send_mqtt_data(
         )
         .await
     {
-        log::error!("MQTT 发布失败: {}", e);
+        log::error!("MQTT 发布失败: {e}");
     } else {
         log::info!("已发布消息: {}", msg.message_name());
     }
