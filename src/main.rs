@@ -226,6 +226,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log::warn!("MQTT 发布任务结束");
     });
     let mavlink_actor_tx_clone = mavlink_actor_tx.clone();
+    let mut retry_count = 0; // 可选的简单重试计数器
     // 处理 MQTT 事件循环（例如收到订阅确认等）
     loop {
         tokio::select! {
@@ -277,6 +278,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         // 其他 topic 可忽略或处理
                     }
+
+                     Ok(Event::Incoming(Packet::ConnAck(ack))) => {
+                        if ack.session_present {
+                            log::info!("MQTT 重连成功，会话继续");
+                        } else {
+                            log::info!("MQTT 连接成功，新会话开始");
+                            // 如果 session 丢失，需要重新订阅主题
+                            if let Err(e) = client.subscribe(&topic_send, QoS::AtMostOnce).await {
+                                log::error!("重新订阅失败: {}", e);
+                            }
+                        }
+                        retry_count = 0; // 重置重试计数
+                    }
                     Ok(Event::Incoming(other)) => {
                         // 忽略其他类型事件（如 PubAck），或按需记录
                         log::trace!("MQTT 其他事件: {:?}", other);
@@ -284,12 +298,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(Event::Outgoing(_)) => {
                         // 通常忽略 outgoing
                     }
+
                     Err(e) => {
-                        log::error!("MQTT 事件循环错误: {}", e);
-                        break;
+                        // ✅ 关键：记录错误但继续循环，不要 break
+                        log::error!("MQTT 事件循环错误: {}. 将尝试重连...", e);
+                        retry_count += 1;
+                        if retry_count > 10 {
+                            log::error!("尝试重连失败次数过多，退出。");
+                            break;
+                        }
+                        // 可选：等待一段时间再继续，避免疯狂重试
+                        tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                 }
             }
+
             _ = tokio::signal::ctrl_c() => {
                 log::info!("收到退出信号，正在关闭...");
                 break;
