@@ -12,7 +12,6 @@ use rumqttc::v5::{
     mqttbytes::{QoS, v5::Packet},
 };
 use serde::Deserialize;
-use serde_json::Value;
 use serde_json::json;
 use std::env;
 use std::{
@@ -42,22 +41,11 @@ enum Payload {
     #[serde(rename = "set_list")]
     SetList { data: Vec<Waypoint> },
 }
-const GIT_COMMITS_JSON: &str = include_str!(concat!(env!("OUT_DIR"), "/git_commits.json"));
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 加载 .env 文件
     dotenv::dotenv().ok();
     init_logger();
-    let v: Value = serde_json::from_str(GIT_COMMITS_JSON).unwrap();
-    let version = v["version"].as_str().unwrap();
-    let count = v["count"].as_u64().unwrap();
-    log::info!("当前程序版本: {}", version);
-    log::info!("共包含 {} 条 commit 记录", count);
-    // 可打印第一条 commit 验证
-    if let Some(first) = v["commits"].as_array().and_then(|arr| arr.first()) {
-        log::info!("最早 commit: {}", first["hash"]);
-    }
-
     // 从环境变量读取配置
     let conn_str =
         env::var("MAVLINK_CONN_STR").unwrap_or_else(|_| "udpin:127.0.0.1:23445".to_string());
@@ -76,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("Web 服务器已启动: http://{}:{}", web_host, web_port);
     let web_server_handle = web_server.run();
-    let web_server_handle = tokio::spawn(web_server_handle);
+    let _web_server_handle = tokio::spawn(web_server_handle);
     let topic = env::var("MQTT_TOPIC_INCOMING").unwrap_or_else(|_| "mavlink/incoming".to_string());
     let (client, mut eventloop) = setup_mqtt()?;
     // 2. 创建消息通道
@@ -93,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             log::error!("MAVLink 工作线程崩溃: {}", e);
         }
     });
-    let mavlink_actor = MavlinkActor::new(vehicle_clone, mavlink_tx);
+    let mavlink_actor = MavlinkActor::new(vehicle_clone);
     let actor_handle = tokio::spawn(async move {
         if let Err(e) = mavlink_actor.run(mavlink_actor_rx).await {
             log::error!("MAVLink Actor 崩溃: {}", e);

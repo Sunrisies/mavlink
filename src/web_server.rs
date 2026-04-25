@@ -1,22 +1,5 @@
-use actix_web::{web, HttpResponse, Responder, Result};
+use actix_web::{HttpResponse, Responder, web};
 use serde_json::Value;
-
-// 定义版本信息的结构体
-#[derive(serde::Serialize, serde::Deserialize)]
-struct VersionInfo {
-    commits: Vec<CommitInfo>,
-    count: u64,
-    version: String,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CommitInfo {
-    author: String,
-    date: String,
-    email: String,
-    hash: String,
-    message: String,
-}
 
 // 处理 /api/version 请求
 pub async fn get_version() -> impl Responder {
@@ -25,7 +8,7 @@ pub async fn get_version() -> impl Responder {
 
     // 解析 JSON
     let v: Value = serde_json::from_str(json_str).unwrap_or_else(|e| {
-        eprintln!("解析 git_commits.json 失败: {}", e);
+        log::error!("解析 git_commits.json 失败: {e}");
         // 返回默认值
         serde_json::json!({
             "commits": [],

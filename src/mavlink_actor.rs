@@ -2,8 +2,9 @@ use anyhow::Result;
 use mavlink::ardupilotmega::MavCmd::{MAV_CMD_COMPONENT_ARM_DISARM, MAV_CMD_DO_SET_MODE};
 use mavlink::ardupilotmega::{
     COMMAND_LONG_DATA, MISSION_ITEM_INT_DATA, MISSION_REQUEST_INT_DATA, MISSION_REQUEST_LIST_DATA,
-    RoverMode,
+    MavMessage::REQUEST_DATA_STREAM, REQUEST_DATA_STREAM_DATA, RoverMode,
 };
+use mavlink::ardupilotmega::{MISSION_CLEAR_ALL_DATA, MISSION_COUNT_DATA};
 use std::sync::Arc;
 
 use mavlink::{MavConnection, MavHeader, ardupilotmega::MavMessage};
@@ -55,18 +56,13 @@ impl Default for MissionState {
 pub struct MavlinkActor {
     vehicle: Arc<Box<dyn MavConnection<MavMessage> + Send + Sync>>,
     state: MissionState,
-    tx: mpsc::Sender<(MavHeader, MavMessage)>,
 }
 
 impl MavlinkActor {
-    pub fn new(
-        vehicle: Arc<Box<dyn MavConnection<MavMessage> + Send + Sync>>,
-        tx: mpsc::Sender<(MavHeader, MavMessage)>,
-    ) -> Self {
+    pub fn new(vehicle: Arc<Box<dyn MavConnection<MavMessage> + Send + Sync>>) -> Self {
         Self {
             vehicle,
             state: MissionState::Idle,
-            tx,
         }
     }
 
@@ -217,7 +213,7 @@ impl MavlinkActor {
                 };
             }
             // 加解锁
-            MavMessage::COMMAND_ACK(ack) => {
+            MavMessage::COMMAND_ACK(_ack) => {
                 // log::info!("收到解锁/上锁响应: {ack:?}");
             }
             _ => {}
@@ -229,11 +225,10 @@ impl MavlinkActor {
     fn handle_set_waypoint_list(&mut self, waypoints: Vec<Waypoint>) -> Result<()> {
         log::info!("收到设置航点列表请求，共 {} 个航点", waypoints.len());
         // 清除现有航点
-        let clear_msg =
-            MavMessage::MISSION_CLEAR_ALL(mavlink::ardupilotmega::MISSION_CLEAR_ALL_DATA {
-                target_system: 1,
-                target_component: 1,
-            });
+        let clear_msg = MavMessage::MISSION_CLEAR_ALL(MISSION_CLEAR_ALL_DATA {
+            target_system: 1,
+            target_component: 1,
+        });
 
         if let Err(e) = self.vehicle.send_default(&clear_msg) {
             log::error!("发送清除航点命令失败: {}", e);
@@ -241,7 +236,7 @@ impl MavlinkActor {
         }
 
         // 发送航点数量
-        let count_msg = MavMessage::MISSION_COUNT(mavlink::ardupilotmega::MISSION_COUNT_DATA {
+        let count_msg = MavMessage::MISSION_COUNT(MISSION_COUNT_DATA {
             target_system: 1,
             target_component: 1,
             count: waypoints.len() as u16,
@@ -360,13 +355,11 @@ pub fn request_parameters() -> mavlink::ardupilotmega::MavMessage {
 
 pub fn request_stream() -> mavlink::ardupilotmega::MavMessage {
     #[expect(deprecated)]
-    mavlink::ardupilotmega::MavMessage::REQUEST_DATA_STREAM(
-        mavlink::ardupilotmega::REQUEST_DATA_STREAM_DATA {
-            target_system: 1,
-            target_component: 1,
-            req_stream_id: 0,
-            req_message_rate: 10,
-            start_stop: 1,
-        },
-    )
+    REQUEST_DATA_STREAM(REQUEST_DATA_STREAM_DATA {
+        target_system: 1,
+        target_component: 1,
+        req_stream_id: 0,
+        req_message_rate: 10,
+        start_stop: 1,
+    })
 }
