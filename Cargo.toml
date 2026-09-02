@@ -1,6 +1,6 @@
 [package]
 name = "sunrise-mavlink-server"
-version = "0.1.66"
+version = "0.1.73"
 edition = "2024"
 build = "build.rs"
 

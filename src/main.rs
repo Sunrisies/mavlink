@@ -1,7 +1,7 @@
-mod logger;
-mod web_server;
 #[cfg(feature = "gpio")]
 mod gpio;
+mod logger;
+mod web_server;
 use actix_web::{App, HttpServer};
 use anyhow::Result;
 use logger::init_logger;
@@ -17,11 +17,17 @@ use serde::Deserialize;
 use serde_json::json;
 use std::env;
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::mpsc::{self};
+use tokio::sync::{
+    RwLock,
+    mpsc::{self},
+};
 use tokio::task;
 
 use crate::mavlink_actor::{
@@ -41,19 +47,24 @@ enum Payload {
     #[serde(rename = "set_mode")]
     SetMode { mode: String },
     #[serde(rename = "set_list")]
-    SetList { data: Vec<Waypoint> },
+    SetList {
+        data: Vec<Waypoint>,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    #[serde(rename = "clear_list")]
+    ClearList,
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 加载 .env 文件
     dotenv::dotenv().ok();
     init_logger();
-    
+
     #[cfg(feature = "gpio")]
-    {
-        let _gpio_manager = gpio::init_gpio()?;
-        log::info!("GPIO系统已启动");
-    }
+    let _gpio_manager = gpio::init_gpio()?;
+    #[cfg(feature = "gpio")]
+    log::info!("GPIO系统已启动");
     // 从环境变量读取配置
     let conn_str =
         env::var("MAVLINK_CONN_STR").unwrap_or_else(|_| "udpin:127.0.0.1:23445".to_string());
@@ -102,6 +113,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let topic_clone = topic.clone();
     let topic_get_list = env::var("MQTT_TOPIC_GET_LIST").unwrap_or_else(|_| "get_list".to_string());
     let topic_set_list = env::var("MQTT_TOPIC_SET_LIST").unwrap_or_else(|_| "set_list".to_string());
+    // 0=无任务、1=上传、2=清除；仅将对应任务的 ACK 发布给前端。
+    let mission_operation = Arc::new(AtomicU8::new(0));
+    let publish_mission_operation = mission_operation.clone();
+    let mission_name = Arc::new(RwLock::new(String::new()));
+    let publish_mission_name = mission_name.clone();
 
     let publish_task = task::spawn(async move {
         let mut waypoint_received: Vec<Waypoint> = Vec::new();
@@ -117,6 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let start_json = json!({
                         "type": "waypoint_download_start",
                         "total": expected_total,
+                        "name": publish_mission_name.read().await.clone(),
                     });
                     let _ = client_clone
                         .publish(
@@ -156,9 +173,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // 如果是最后一个航点，发布完成消息
                     if (item.seq + 1) == expected_total {
+                        // 完成消息原样返回飞控的全部任务项，不在后端猜测或过滤 0,0。
+                        // 这样前端能看到真实数量，便于判断该坐标是否来自飞控。
                         let complete_json = json!({
                             "type": "waypoints_complete",
                             "count": waypoint_received.len(),
+                            "name": publish_mission_name.read().await.clone(),
                             "waypoints": waypoint_received,
                         });
                         let _ = client_clone
@@ -175,9 +195,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 // 处理上传开始通知
                 MavMessage::MISSION_CLEAR_ALL(_) => {}
+                #[allow(deprecated)]
                 MavMessage::MISSION_REQUEST(msg) => {
                     is_uploading = true;
-                    log::info!("主线程收到航点写入数据{msg:?}");
+                    log::info!("主线程收到旧版航点写入请求{msg:?}");
+                    let wp = WaypointWrite { seq: msg.seq };
+                    if let Err(e) = client_clone
+                        .publish(
+                            &topic_set_list,
+                            QoS::AtLeastOnce,
+                            false,
+                            serde_json::to_vec(&wp).unwrap(),
+                        )
+                        .await
+                    {
+                        log::error!("MQTT 发布上传航点失败: {}", e);
+                    }
+                }
+                MavMessage::MISSION_REQUEST_INT(msg) => {
+                    is_uploading = true;
+                    log::info!("主线程收到航点写入请求{msg:?}");
                     let wp = WaypointWrite { seq: msg.seq };
                     if let Err(e) = client_clone
                         .publish(
@@ -192,11 +229,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 MavMessage::MISSION_ACK(msg) => {
-                    if is_uploading {
-                        is_uploading = false;
-                        let complete_json = json!({
-                            "data": "航线写入完成",
-                        });
+                    let operation = publish_mission_operation.load(Ordering::SeqCst);
+                    let complete_json = match operation {
+                        // 上传前必须先收到至少一个 MISSION_REQUEST；此前的 ACK 不属于本次上传。
+                        1 if is_uploading => {
+                            publish_mission_operation.store(0, Ordering::SeqCst);
+                            is_uploading = false;
+                            log::info!("航点上传完成");
+                            Some(json!({
+                                "type": "upload_complete",
+                                "data": "航线写入完成",
+                                "name": publish_mission_name.read().await.clone(),
+                            }))
+                        }
+                        2 => {
+                            publish_mission_operation.store(0, Ordering::SeqCst);
+                            log::info!("航线清除完成");
+                            Some(json!({ "type": "clear_complete" }))
+                        }
+                        _ => None,
+                    };
+                    if let Some(complete_json) = complete_json {
                         let _ = client_clone
                             .publish(
                                 &topic_set_list,
@@ -205,9 +258,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 serde_json::to_vec(&complete_json).unwrap(),
                             )
                             .await;
-                        log::info!("航点上传完成");
                     }
-                    log::info!("主线程收到航点写入确认{msg:?}");
+                    log::info!("主线程收到航点确认{msg:?}");
                 }
                 _ => {
                     // 其他消息发布到原来的 mavlink/incoming 频道
@@ -222,6 +274,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log::warn!("MQTT 发布任务结束");
     });
     let mavlink_actor_tx_clone = mavlink_actor_tx.clone();
+    let mqtt_mission_operation = mission_operation.clone();
+    let mqtt_mission_name = mission_name.clone();
     let mut retry_count = 0; // 可选的简单重试计数器
     // 处理 MQTT 事件循环（例如收到订阅确认等）
     loop {
@@ -258,11 +312,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 log::error!("发送设置飞行模式命令失败: {}", e);
                                             }
                                         }
-                                        Payload::SetList { data } => {
+                                        Payload::SetList { data, name } => {
                                             // 处理设置航点列表请求
                                             log::info!("收到 set_list 请求，共 {} 个航点", data.len());
+                                            *mqtt_mission_name.write().await = name.unwrap_or_default();
+                                            mqtt_mission_operation.store(
+                                                if data.is_empty() { 2 } else { 1 },
+                                                Ordering::SeqCst,
+                                            );
                                             if let Err(e) = mavlink_actor_tx.send(MavlinkActorMessage::SetWaypointList { waypoints: data }).await {
+                                                mqtt_mission_operation.store(0, Ordering::SeqCst);
                                                 log::error!("发送设置航点列表命令失败: {}", e);
+                                            }
+                                        }
+                                        Payload::ClearList => {
+                                            log::info!("收到 clear_list 请求");
+                                            mqtt_mission_operation.store(2, Ordering::SeqCst);
+                                            if let Err(e) = mavlink_actor_tx.send(MavlinkActorMessage::ClearWaypointList).await {
+                                                mqtt_mission_operation.store(0, Ordering::SeqCst);
+                                                log::error!("发送清除航点命令失败: {}", e);
                                             }
                                         }
                                     }
@@ -541,7 +609,7 @@ async fn send_mqtt_data(
     {
         log::error!("MQTT 发布失败: {e}");
     } else {
-        log::info!("已发布消息: {}", msg.message_name());
+        // log::info!("已发布消息: {}", msg.message_name());
     }
     Ok(())
 }

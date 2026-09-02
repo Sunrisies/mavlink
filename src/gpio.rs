@@ -94,7 +94,9 @@ impl GpioManager {
         if !(0.0..=1.0).contains(&duty_cycle) {
             return Err(anyhow::anyhow!("PWM占空比必须在0.0到1.0之间"));
         }
-        self.tx.send(GpioMessage::SetPwm { pin, duty_cycle }).await?;
+        self.tx
+            .send(GpioMessage::SetPwm { pin, duty_cycle })
+            .await?;
         Ok(())
     }
 
