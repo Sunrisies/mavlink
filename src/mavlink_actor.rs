@@ -11,6 +11,10 @@ use mavlink::{MavConnection, MavHeader, ardupilotmega::MavMessage};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+// 默认飞控地址。在收到可信 HEARTBEAT 后，后续可由动态发现的地址覆盖。
+pub const DEFAULT_TARGET_SYSTEM_ID: u8 = 1;
+pub const DEFAULT_TARGET_COMPONENT_ID: u8 = 1;
+
 // 定义航点结构体，用于序列化响应
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Waypoint {
@@ -117,8 +121,8 @@ impl MavlinkActor {
                         } else {
                             // 请求第一个航点
                             let req = MavMessage::MISSION_REQUEST_INT(MISSION_REQUEST_INT_DATA {
-                                target_system: 1,
-                                target_component: 1,
+                                target_system: DEFAULT_TARGET_SYSTEM_ID,
+                                target_component: DEFAULT_TARGET_COMPONENT_ID,
                                 seq: 0,
                             });
                             if let Err(e) = self.vehicle.send_default(&req) {
@@ -156,8 +160,8 @@ impl MavlinkActor {
                         if following_seq < expected_count {
                             // 请求下一个航点
                             let req = MavMessage::MISSION_REQUEST_INT(MISSION_REQUEST_INT_DATA {
-                                target_system: 1,
-                                target_component: 1,
+                                target_system: DEFAULT_TARGET_SYSTEM_ID,
+                                target_component: DEFAULT_TARGET_COMPONENT_ID,
                                 seq: following_seq,
                             });
                             if let Err(e) = self.vehicle.send_default(&req) {
@@ -245,8 +249,8 @@ impl MavlinkActor {
             MissionState::Uploading { waypoints, .. } if seq < waypoints.len() as u16 => {
                 let wp = &waypoints[seq as usize];
                 let item = MavMessage::MISSION_ITEM_INT(MISSION_ITEM_INT_DATA {
-                    target_system: 1,
-                    target_component: 1,
+                    target_system: DEFAULT_TARGET_SYSTEM_ID,
+                    target_component: DEFAULT_TARGET_COMPONENT_ID,
                     // 飞控请求的 seq 才是协议中的航点序号；输入数据的 seq 可能不连续。
                     seq,
                     frame: mavlink::ardupilotmega::MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT,
@@ -312,8 +316,8 @@ impl MavlinkActor {
 
         self.pending_download = false;
         let clear_msg = MavMessage::MISSION_CLEAR_ALL(MISSION_CLEAR_ALL_DATA {
-            target_system: 1,
-            target_component: 1,
+            target_system: DEFAULT_TARGET_SYSTEM_ID,
+            target_component: DEFAULT_TARGET_COMPONENT_ID,
         });
         if let Err(e) = self.vehicle.send_default(&clear_msg) {
             log::error!("发送清除航点命令失败: {}", e);
@@ -325,8 +329,8 @@ impl MavlinkActor {
 
     fn send_mission_count(&mut self, waypoints: &[Waypoint]) -> Result<()> {
         let count_msg = MavMessage::MISSION_COUNT(MISSION_COUNT_DATA {
-            target_system: 1,
-            target_component: 1,
+            target_system: DEFAULT_TARGET_SYSTEM_ID,
+            target_component: DEFAULT_TARGET_COMPONENT_ID,
             count: waypoints.len() as u16,
         });
         if let Err(e) = self.vehicle.send_default(&count_msg) {
@@ -356,8 +360,8 @@ impl MavlinkActor {
 
     fn send_mission_request_list(&mut self) -> Result<()> {
         let req = MavMessage::MISSION_REQUEST_LIST(MISSION_REQUEST_LIST_DATA {
-            target_system: 1,
-            target_component: 1,
+            target_system: DEFAULT_TARGET_SYSTEM_ID,
+            target_component: DEFAULT_TARGET_COMPONENT_ID,
         });
         if let Err(e) = self.vehicle.send_default(&req) {
             log::error!("发送 MISSION_REQUEST_LIST 失败: {}", e);
@@ -371,8 +375,8 @@ impl MavlinkActor {
     fn handle_arm_disarm(&mut self, arm: bool) -> Result<()> {
         log::info!("收到解锁/上锁命令: {}", arm);
         let msg = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
-            target_system: 1,                      // 动态获取或配置
-            target_component: 1,                   // 飞控组件 ID 通常为 1
+            target_system: DEFAULT_TARGET_SYSTEM_ID,
+            target_component: DEFAULT_TARGET_COMPONENT_ID,
             command: MAV_CMD_COMPONENT_ARM_DISARM, // 400
             confirmation: 1,                       // 0=首次发送，1=确认
             param1: if arm { 1.0 } else { 0.0 },
@@ -412,8 +416,8 @@ impl MavlinkActor {
         };
 
         let msg = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
-            target_system: 1,             // 替换为你的飞控系统ID
-            target_component: 1,          // 飞控组件ID通常为1
+            target_system: DEFAULT_TARGET_SYSTEM_ID,
+            target_component: DEFAULT_TARGET_COMPONENT_ID,
             command: MAV_CMD_DO_SET_MODE, // MAV_CMD_DO_SET_MODE 的命令编号
             confirmation: 0,
             param1: 1.0,               // 固定为1.0
@@ -445,8 +449,8 @@ pub fn heartbeat_message() -> mavlink::ardupilotmega::MavMessage {
 pub fn request_parameters() -> mavlink::ardupilotmega::MavMessage {
     mavlink::ardupilotmega::MavMessage::PARAM_REQUEST_LIST(
         mavlink::ardupilotmega::PARAM_REQUEST_LIST_DATA {
-            target_system: 1,
-            target_component: 1,
+            target_system: DEFAULT_TARGET_SYSTEM_ID,
+            target_component: DEFAULT_TARGET_COMPONENT_ID,
         },
     )
 }
@@ -454,8 +458,8 @@ pub fn request_parameters() -> mavlink::ardupilotmega::MavMessage {
 pub fn request_stream() -> mavlink::ardupilotmega::MavMessage {
     #[expect(deprecated)]
     REQUEST_DATA_STREAM(REQUEST_DATA_STREAM_DATA {
-        target_system: 1,
-        target_component: 1,
+        target_system: DEFAULT_TARGET_SYSTEM_ID,
+        target_component: DEFAULT_TARGET_COMPONENT_ID,
         req_stream_id: 0,
         req_message_rate: 10,
         start_stop: 1,
