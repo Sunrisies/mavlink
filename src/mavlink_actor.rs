@@ -169,48 +169,15 @@ impl MavlinkActor {
             MavMessage::HEARTBEAT(heartbeat) => {
                 log::info!("收到心跳: {heartbeat:?}");
             }
-            // 处理上传航点时的MISSION_REQUEST消息
+            // 新版飞控通常使用 MISSION_REQUEST_INT；保留旧消息以兼容老设备。
+            MavMessage::MISSION_REQUEST_INT(req) => {
+                log::info!("收到 MISSION_REQUEST_INT 航点请求: {req:?}");
+                self.handle_mission_request(req.seq)?;
+            }
+            #[allow(deprecated)]
             MavMessage::MISSION_REQUEST(req) => {
-                log::info!("收到航点请求: {req:?}");
-                self.state = match std::mem::take(&mut self.state) {
-                    MissionState::Uploading {
-                        waypoints,
-                        current_index,
-                    } => {
-                        if req.seq < waypoints.len() as u16 {
-                            let wp = &waypoints[req.seq as usize];
-                            let item = MavMessage::MISSION_ITEM_INT(MISSION_ITEM_INT_DATA {
-                                target_system: 1,
-                                target_component: 1,
-                                seq: wp.seq,
-                                frame:
-                                    mavlink::ardupilotmega::MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT,
-                                command: mavlink::ardupilotmega::MavCmd::MAV_CMD_NAV_WAYPOINT,
-                                current: if req.seq == 0 { 1 } else { 0 },
-                                autocontinue: 1,
-                                param1: 0.0,
-                                param2: 0.0,
-                                param3: 0.0,
-                                param4: 0.0,
-                                x: (wp.lat * 1e7) as i32,
-                                y: (wp.lon * 1e7) as i32,
-                                z: wp.alt,
-                            });
-                            if let Err(e) = self.vehicle.send_default(&item) {
-                                log::error!("发送航点失败: {}", e);
-                                MissionState::Idle
-                            } else {
-                                MissionState::Uploading {
-                                    waypoints,
-                                    current_index: req.seq as usize + 1,
-                                }
-                            }
-                        } else {
-                            MissionState::Idle
-                        }
-                    }
-                    other => other, // 保持其他状态不变
-                };
+                log::info!("收到旧版 MISSION_REQUEST 航点请求: {req:?}");
+                self.handle_mission_request(req.seq)?;
             }
             // 加解锁
             MavMessage::COMMAND_ACK(_ack) => {
@@ -219,6 +186,45 @@ impl MavlinkActor {
             _ => {}
         }
 
+        Ok(())
+    }
+
+    fn handle_mission_request(&mut self, seq: u16) -> Result<()> {
+        self.state = match std::mem::take(&mut self.state) {
+            MissionState::Uploading { waypoints, .. } if seq < waypoints.len() as u16 => {
+                let wp = &waypoints[seq as usize];
+                let item = MavMessage::MISSION_ITEM_INT(MISSION_ITEM_INT_DATA {
+                    target_system: 1,
+                    target_component: 1,
+                    seq: wp.seq,
+                    frame: mavlink::ardupilotmega::MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT,
+                    command: mavlink::ardupilotmega::MavCmd::MAV_CMD_NAV_WAYPOINT,
+                    current: if seq == 0 { 1 } else { 0 },
+                    autocontinue: 1,
+                    param1: 0.0,
+                    param2: 0.0,
+                    param3: 0.0,
+                    param4: 0.0,
+                    x: (wp.lat * 1e7) as i32,
+                    y: (wp.lon * 1e7) as i32,
+                    z: wp.alt,
+                });
+                if let Err(e) = self.vehicle.send_default(&item) {
+                    log::error!("发送航点失败: {}", e);
+                    MissionState::Idle
+                } else {
+                    MissionState::Uploading {
+                        waypoints,
+                        current_index: seq as usize + 1,
+                    }
+                }
+            }
+            MissionState::Uploading { .. } => {
+                log::warn!("收到超出范围的航点请求，seq={seq}");
+                MissionState::Idle
+            }
+            other => other,
+        };
         Ok(())
     }
 

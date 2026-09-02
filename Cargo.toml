@@ -1,8 +1,12 @@
 [package]
 name = "sunrise-mavlink-server"
-version = "0.1.43"
+version = "0.1.66"
 edition = "2024"
 build = "build.rs"
+
+[features]
+default = []
+gpio = []
 
 [profile.release]
 opt-level = "z"   # 优化大小

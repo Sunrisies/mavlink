@@ -1,5 +1,6 @@
 mod logger;
 mod web_server;
+#[cfg(feature = "gpio")]
 mod gpio;
 use actix_web::{App, HttpServer};
 use anyhow::Result;
@@ -48,10 +49,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
     init_logger();
     
-    // 初始化GPIO
-    let gpio_manager = gpio::init_gpio()?;
-    let gpio_sender = gpio_manager.get_sender();
-    log::info!("GPIO系统已启动");
+    #[cfg(feature = "gpio")]
+    {
+        let _gpio_manager = gpio::init_gpio()?;
+        log::info!("GPIO系统已启动");
+    }
     // 从环境变量读取配置
     let conn_str =
         env::var("MAVLINK_CONN_STR").unwrap_or_else(|_| "udpin:127.0.0.1:23445".to_string());
